@@ -9,10 +9,20 @@ from openai import OpenAI
 
 from config import settings
 from db import get_collection
+from user_profile import UserProfile, load_profile
 
 router = APIRouter()
 
 RELATED_SIMILARITY_THRESHOLD = 0.6
+
+
+# ── Request model ─────────────────────────────────────────────────────────────
+
+class GapsRequest(BaseModel):
+    goal: str | None = None
+    fields: list[str] = []
+    level: str | None = None
+    timeline: str | None = None
 
 
 # ── Response models ───────────────────────────────────────────────────────────
@@ -23,23 +33,33 @@ class ClusterSummary(BaseModel):
     keywords: list[str]
     doc_count: int
     is_gap: bool
-    severity: str           # "none" | "low" | "medium" | "critical"
+    severity: str             # "none" | "low" | "medium" | "critical"
     related_clusters: list[int]
 
 
 class GapRecommendation(BaseModel):
     area: str
-    severity: str           # "low" | "medium" | "critical"
+    severity: str             # "low" | "medium" | "critical"
+    goal_relevance: str       # "high" | "medium" | "low"
     related_strong_topic: str | None
     reason: str
     recommendation: str
 
 
+class RoadmapPhase(BaseModel):
+    phase: int
+    period: str
+    focus: str
+    topics: list[str]
+
+
 class GapsResponse(BaseModel):
+    goal: str | None
     total_chunks: int
     n_clusters: int
     clusters: list[ClusterSummary]
     gaps: list[GapRecommendation]
+    roadmap: list[RoadmapPhase] | None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -55,7 +75,6 @@ def _gap_severity(doc_count: int, avg: float, has_related_strong: bool) -> str:
 
 
 def _related_cluster_map(centers: np.ndarray) -> dict[int, list[int]]:
-    """Returns mapping cid → list of related cluster ids (cosine sim > threshold)."""
     n = len(centers)
     sim = cosine_similarity(centers)
     related: dict[int, list[int]] = {i: [] for i in range(n)}
@@ -67,10 +86,37 @@ def _related_cluster_map(centers: np.ndarray) -> dict[int, list[int]]:
     return related
 
 
+def _merge_profile(request: GapsRequest) -> UserProfile:
+    """Request body overrides saved profile field by field."""
+    saved = load_profile()
+    return UserProfile(
+        goal=request.goal if request.goal is not None else saved.goal,
+        fields=request.fields if request.fields else saved.fields,
+        level=request.level if request.level is not None else saved.level,
+        timeline=request.timeline if request.timeline is not None else saved.timeline,
+    )
+
+
+def _goal_context(profile: UserProfile) -> str | None:
+    if not profile.goal:
+        return None
+    lines = [f"- 커리어 목표: {profile.goal}"]
+    if profile.fields:
+        lines.append(f"- 관심 분야: {', '.join(profile.fields)}")
+    if profile.level:
+        lines.append(f"- 현재 레벨: {profile.level}")
+    if profile.timeline:
+        lines.append(f"- 목표 기간: {profile.timeline}")
+    return "\n".join(lines)
+
+
 # ── Route ─────────────────────────────────────────────────────────────────────
 
-@router.get("/gaps", response_model=GapsResponse)
-async def get_gaps():
+@router.post("/gaps", response_model=GapsResponse)
+async def post_gaps(body: GapsRequest = GapsRequest()):
+    profile = _merge_profile(body)
+    goal_ctx = _goal_context(profile)
+
     collection = get_collection()
     result = collection.get(include=["embeddings", "documents", "metadatas"])
 
@@ -90,7 +136,6 @@ async def get_gaps():
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
     labels = kmeans.fit_predict(X)
 
-    # Group docs by cluster
     clusters_docs: dict[int, list[str]] = {i: [] for i in range(n_clusters)}
     for doc, label in zip(docs, labels):
         clusters_docs[int(label)].append(doc)
@@ -98,10 +143,7 @@ async def get_gaps():
     cluster_sizes = {cid: len(cdocs) for cid, cdocs in clusters_docs.items()}
     avg_size = total / n_clusters
 
-    # Cluster relationships via cosine similarity of KMeans centers
     related_map = _related_cluster_map(kmeans.cluster_centers_)
-
-    # Strong clusters = above average, used to escalate related gaps to "critical"
     strong_cluster_ids = {cid for cid, sz in cluster_sizes.items() if sz >= avg_size}
 
     def has_related_strong(cid: int) -> bool:
@@ -113,10 +155,10 @@ async def get_gaps():
     }
     gap_cluster_ids = {cid for cid, sev in severities.items() if sev != "none"}
 
-    # Build representative text per cluster (first ~300 chars, up to 5 docs)
     def cluster_sample(cid: int) -> str:
         return "\n---\n".join(d[:300] for d in clusters_docs[cid][:5])
 
+    # ── Fallback: no OpenAI key ───────────────────────────────────────────────
     if not settings.openai_api_key:
         clusters = [
             ClusterSummary(
@@ -131,15 +173,17 @@ async def get_gaps():
             for cid in range(n_clusters)
         ]
         return GapsResponse(
+            goal=profile.goal,
             total_chunks=total,
             n_clusters=n_clusters,
             clusters=clusters,
             gaps=[],
+            roadmap=None,
         )
 
     client = OpenAI(api_key=settings.openai_api_key)
 
-    # Call 1: extract topic + keywords for every cluster in one shot
+    # ── Call 1: topic + keywords for all clusters ─────────────────────────────
     cluster_prompts = "\n\n".join(
         f"[클러스터 {cid}]\n{cluster_sample(cid)}" for cid in range(n_clusters)
     )
@@ -179,10 +223,11 @@ async def get_gaps():
         for cid in range(n_clusters)
     ]
 
-    # Call 2: generate recommendations for gap clusters only, with severity context
+    # ── Call 2: gap recommendations + optional roadmap ────────────────────────
     gaps: list[GapRecommendation] = []
+    roadmap: list[RoadmapPhase] | None = None
+
     if gap_cluster_ids:
-        # Build context: for each gap cluster, include its related strong topic name if any
         gap_lines = []
         for cid in sorted(gap_cluster_ids):
             related_strong = [
@@ -198,34 +243,58 @@ async def get_gaps():
             )
         gap_descriptions = "\n".join(gap_lines)
 
+        if goal_ctx:
+            user_content = (
+                f"[사용자 정보]\n{goal_ctx}\n\n"
+                f"[지식 공백 클러스터]\n{gap_descriptions}\n\n"
+                f"위 사용자의 커리어 목표를 기준으로 분석해주세요."
+            )
+            system_content = (
+                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n"
+                "사용자의 커리어 목표를 기반으로 지식 공백을 재평가하고 "
+                "학습 로드맵을 생성해주세요.\n\n"
+                "규칙:\n"
+                "1. 목표와 직결된 공백은 severity를 critical로, 무관한 공백은 low로 조정\n"
+                "2. goal_relevance는 목표와의 연관성 (high/medium/low)\n"
+                "3. roadmap은 목표 기간 안에 달성 가능한 phase별 학습 계획\n\n"
+                "반드시 다음 JSON 형식으로만 응답하세요:\n"
+                '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
+                '"goal_relevance": "high|medium|low", '
+                '"related_strong_topic": "연관 토픽명 또는 null", '
+                '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
+                '"roadmap": [{"phase": 1, "period": "1~2개월", "focus": "핵심 목표", '
+                '"topics": ["토픽1", "토픽2"]}]}'
+            )
+        else:
+            user_content = f"다음 지식 공백 클러스터를 분석해주세요:\n{gap_descriptions}"
+            system_content = (
+                "당신은 개인 지식 관리 전문가입니다. "
+                "지식 공백(gap) 클러스터에 대해 구체적인 보완 추천을 해주세요. "
+                "심각도(critical/medium/low)와 연관된 강한 토픽 정보를 활용하세요. "
+                "반드시 다음 JSON 형식으로만 응답하세요:\n"
+                '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
+                '"goal_relevance": "medium", '
+                '"related_strong_topic": "연관 토픽명 또는 null", '
+                '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
+                '"roadmap": null}'
+            )
+
         gap_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "당신은 개인 지식 관리 전문가입니다. "
-                        "지식 공백(gap) 클러스터에 대해 구체적인 보완 추천을 해주세요. "
-                        "심각도(critical/medium/low)와 연관된 강한 토픽 정보를 활용하세요. "
-                        "반드시 다음 JSON 형식으로만 응답하세요:\n"
-                        '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
-                        '"related_strong_topic": "연관 토픽명 또는 null", '
-                        '"reason": "부족한 이유", "recommendation": "추천 행동"}]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"다음 지식 공백 클러스터를 분석해주세요:\n{gap_descriptions}",
-                },
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
             ],
             response_format={"type": "json_object"},
             temperature=0.5,
         )
         gap_data = json.loads(gap_response.choices[0].message.content)
+
         gaps = [
             GapRecommendation(
                 area=item.get("area", ""),
                 severity=item.get("severity", "medium"),
+                goal_relevance=item.get("goal_relevance", "medium"),
                 related_strong_topic=item.get("related_strong_topic"),
                 reason=item.get("reason", ""),
                 recommendation=item.get("recommendation", ""),
@@ -233,9 +302,22 @@ async def get_gaps():
             for item in gap_data.get("gaps", [])
         ]
 
+        if goal_ctx and gap_data.get("roadmap"):
+            roadmap = [
+                RoadmapPhase(
+                    phase=item.get("phase", i + 1),
+                    period=item.get("period", ""),
+                    focus=item.get("focus", ""),
+                    topics=item.get("topics", []),
+                )
+                for i, item in enumerate(gap_data["roadmap"])
+            ]
+
     return GapsResponse(
+        goal=profile.goal,
         total_chunks=total,
         n_clusters=n_clusters,
         clusters=clusters,
         gaps=gaps,
+        roadmap=roadmap,
     )

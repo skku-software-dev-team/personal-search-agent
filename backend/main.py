@@ -10,6 +10,7 @@ from embeddings import init_model
 from gaps import router as gaps_router
 from ingest import router as ingest_router
 from search import router as search_router
+from user_profile import router as user_profile_router
 
 
 @asynccontextmanager
@@ -31,6 +32,7 @@ app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(analytics_router)
 app.include_router(gaps_router)
+app.include_router(user_profile_router)
 
 
 @app.get("/health")
