@@ -159,8 +159,8 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     def cluster_sample(cid: int) -> str:
         return "\n---\n".join(d[:300] for d in clusters_docs[cid][:5])
 
-    # ── Fallback: no OpenAI key ───────────────────────────────────────────────
-    if not settings.openai_api_key:
+    # ── Fallback: no LLM key ─────────────────────────────────────────────────
+    if not settings.openai_api_key and not settings.groq_api_key:
         clusters = [
             ClusterSummary(
                 cluster_id=cid,
@@ -182,7 +182,16 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             roadmap=None,
         )
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    # Groq 우선, 없으면 OpenAI
+    if settings.groq_api_key:
+        client = OpenAI(
+            api_key=settings.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+        model = "llama-3.3-70b-versatile"
+    else:
+        client = OpenAI(api_key=settings.openai_api_key)
+        model = "gpt-4o-mini"
 
     # ── Call 1: topic + keywords for all clusters ─────────────────────────────
     cluster_prompts = "\n\n".join(
@@ -190,7 +199,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     )
     try:
         label_response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -294,7 +303,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
 
         try:
             gap_response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_content},
