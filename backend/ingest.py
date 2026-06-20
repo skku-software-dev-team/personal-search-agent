@@ -165,9 +165,9 @@ async def ingest_local():
             continue
 
         try:
-            created_at = datetime.fromtimestamp(
+            created_at = int(datetime.fromtimestamp(
                 path.stat().st_mtime, tz=timezone.utc
-            ).date().isoformat()
+            ).date().isoformat().replace("-", ""))
         except Exception:
             created_at = datetime.now(timezone.utc).date().isoformat()
 
