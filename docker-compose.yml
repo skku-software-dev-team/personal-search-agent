@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  chromadb:
+    image: chromadb/chroma:0.5.3
+    container_name: psa_chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - psa_chroma_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.token.TokenConfigServerAuthCredentialsProvider
+      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
+      - CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER=AUTHORIZATION
+      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_AUTH_TOKEN:-psa-local-token}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: psa_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ${LOCAL_FOLDER_PATH:-./sample_docs}:/data/local:ro
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN:-psa-local-token}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOCAL_FOLDER_PATH=/data/local
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jhgan/ko-sroberta-multitask}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+    depends_on:
+      chromadb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: psa_frontend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend:/app
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  psa_chroma_data:
+    driver: local
