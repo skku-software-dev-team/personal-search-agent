@@ -150,6 +150,16 @@ if res.status_code == 422:
     st.warning(f"⚠️ {res.json().get('detail', '문서가 부족합니다.')}")
     st.info("먼저 `POST /ingest/local` 또는 `POST /ingest`로 문서를 등록해주세요.")
     st.stop()
+elif res.status_code == 401:
+    st.error("🔑 OpenAI API 키가 올바르지 않습니다.")
+    st.code("OPENAI_API_KEY=sk-...  # .env 파일에 추가 후 docker compose up --build")
+    st.stop()
+elif res.status_code == 429:
+    st.error("⏱️ OpenAI API 요청 한도 초과. 잠시 후 다시 시도해주세요.")
+    st.stop()
+elif res.status_code == 502:
+    st.error(f"🌐 {res.json().get('detail', 'OpenAI API 오류가 발생했습니다.')}")
+    st.stop()
 elif res.status_code != 200:
     st.error(f"오류 {res.status_code}: {res.text}")
     st.stop()

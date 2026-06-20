@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import openai
 from openai import OpenAI
 
 from config import settings
@@ -187,23 +188,35 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     cluster_prompts = "\n\n".join(
         f"[클러스터 {cid}]\n{cluster_sample(cid)}" for cid in range(n_clusters)
     )
-    label_response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 문서 분석 전문가입니다. "
-                    "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
-                    "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
-                    '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
-                ),
-            },
-            {"role": "user", "content": cluster_prompts},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.3,
-    )
+    try:
+        label_response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "당신은 문서 분석 전문가입니다. "
+                        "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
+                        "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
+                        '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
+                    ),
+                },
+                {"role": "user", "content": cluster_prompts},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+    except openai.AuthenticationError:
+        raise HTTPException(
+            status_code=401,
+            detail="OpenAI API 키가 올바르지 않습니다. .env 파일의 OPENAI_API_KEY를 확인해주세요.",
+        )
+    except openai.RateLimitError:
+        raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+    except openai.APIConnectionError:
+        raise HTTPException(status_code=502, detail="OpenAI 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
+    except openai.OpenAIError as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI API 오류: {e}")
 
     label_data = json.loads(label_response.choices[0].message.content)
     label_map: dict[int, dict] = {
@@ -279,15 +292,27 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 '"roadmap": null}'
             )
 
-        gap_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.5,
-        )
+        try:
+            gap_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.5,
+            )
+        except openai.AuthenticationError:
+            raise HTTPException(
+                status_code=401,
+                detail="OpenAI API 키가 올바르지 않습니다. .env 파일의 OPENAI_API_KEY를 확인해주세요.",
+            )
+        except openai.RateLimitError:
+            raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+        except openai.APIConnectionError:
+            raise HTTPException(status_code=502, detail="OpenAI 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
+        except openai.OpenAIError as e:
+            raise HTTPException(status_code=502, detail=f"OpenAI API 오류: {e}")
         gap_data = json.loads(gap_response.choices[0].message.content)
 
         gaps = [
