@@ -7,9 +7,12 @@ from chat import router as chat_router
 from config import settings
 from db import init_collection
 from embeddings import init_model
+from gaps import router as gaps_router
 from ingest import router as ingest_router
 from search import router as search_router
 from timeline import generate_timeline
+from user_profile import router as user_profile_router
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,6 +32,8 @@ app.include_router(ingest_router)
 app.include_router(search_router)
 app.include_router(chat_router)
 app.include_router(analytics_router)
+app.include_router(gaps_router)
+app.include_router(user_profile_router)
 
 
 @app.get("/health")

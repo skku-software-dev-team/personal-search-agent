@@ -10,6 +10,8 @@ class AppSettings(BaseSettings):
     collection_name: str = "documents"
     chunk_size: int = 512
     chunk_overlap: int = 64
+    openai_api_key: str = ""
+    groq_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
