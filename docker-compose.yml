@@ -30,6 +30,7 @@ services:
       - CHROMA_PORT=8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN:-psa-local-token}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - LOCAL_FOLDER_PATH=/data/local
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jhgan/ko-sroberta-multitask}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}

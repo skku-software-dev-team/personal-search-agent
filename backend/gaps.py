@@ -41,6 +41,7 @@ class ClusterSummary(BaseModel):
 class GapRecommendation(BaseModel):
     area: str
     severity: str             # "low" | "medium" | "critical"
+    gap_type: str             # "missing" | "sparse"
     goal_relevance: str       # "high" | "medium" | "low"
     related_strong_topic: str | None
     reason: str
@@ -58,6 +59,7 @@ class GapsResponse(BaseModel):
     goal: str | None
     total_chunks: int
     n_clusters: int
+    required_areas: list[str] | None
     clusters: list[ClusterSummary]
     gaps: list[GapRecommendation]
     roadmap: list[RoadmapPhase] | None
@@ -109,6 +111,25 @@ def _goal_context(profile: UserProfile) -> str | None:
     if profile.timeline:
         lines.append(f"- 목표 기간: {profile.timeline}")
     return "\n".join(lines)
+
+
+def _llm_call(client: OpenAI, model: str, messages: list, temperature: float = 0.3) -> dict:
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+        )
+        return json.loads(response.choices[0].message.content)
+    except openai.AuthenticationError:
+        raise HTTPException(status_code=401, detail="API 키가 올바르지 않습니다. .env 파일을 확인해주세요.")
+    except openai.RateLimitError:
+        raise HTTPException(status_code=429, detail="API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+    except openai.APIConnectionError:
+        raise HTTPException(status_code=502, detail="LLM 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
+    except openai.OpenAIError as e:
+        raise HTTPException(status_code=502, detail=f"LLM API 오류: {e}")
 
 
 # ── Route ─────────────────────────────────────────────────────────────────────
@@ -177,6 +198,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             goal=profile.goal,
             total_chunks=total,
             n_clusters=n_clusters,
+            required_areas=None,
             clusters=clusters,
             gaps=[],
             roadmap=None,
@@ -193,41 +215,57 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         client = OpenAI(api_key=settings.openai_api_key)
         model = "gpt-4o-mini"
 
-    # ── Call 1: topic + keywords for all clusters ─────────────────────────────
-    cluster_prompts = "\n\n".join(
-        f"[클러스터 {cid}]\n{cluster_sample(cid)}" for cid in range(n_clusters)
-    )
-    try:
-        label_response = client.chat.completions.create(
-            model=model,
+    # ── Call 0: 목표 달성에 필요한 지식 영역 목록 생성 (목표 있을 때만) ───────────
+    required_areas: list[str] = []
+    if goal_ctx:
+        req_data = _llm_call(
+            client,
+            model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "당신은 문서 분석 전문가입니다. "
-                        "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
-                        "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
-                        '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
+                        "당신은 커리어 코치 전문가입니다. "
+                        "사용자의 목표를 달성하기 위해 반드시 알아야 할 핵심 지식 영역을 나열해주세요. "
+                        "각 영역은 구체적이고 학습 가능한 단위로 적어주세요. "
+                        "반드시 다음 JSON 형식으로만 응답하세요:\n"
+                        '{"required_areas": ["영역1", "영역2", ...]}'
                     ),
                 },
-                {"role": "user", "content": cluster_prompts},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{goal_ctx}\n\n"
+                        "이 목표를 달성하기 위해 반드시 알아야 할 핵심 지식 영역 10~15개를 반환해주세요. "
+                        "(예: REST API 설계, 데이터베이스 인덱싱, Docker 컨테이너화)"
+                    ),
+                },
             ],
-            response_format={"type": "json_object"},
             temperature=0.3,
         )
-    except openai.AuthenticationError:
-        raise HTTPException(
-            status_code=401,
-            detail="OpenAI API 키가 올바르지 않습니다. .env 파일의 OPENAI_API_KEY를 확인해주세요.",
-        )
-    except openai.RateLimitError:
-        raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
-    except openai.APIConnectionError:
-        raise HTTPException(status_code=502, detail="OpenAI 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
-    except openai.OpenAIError as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI API 오류: {e}")
+        required_areas = req_data.get("required_areas", [])
 
-    label_data = json.loads(label_response.choices[0].message.content)
+    # ── Call 1: topic + keywords for all clusters ─────────────────────────────
+    cluster_prompts = "\n\n".join(
+        f"[클러스터 {cid}]\n{cluster_sample(cid)}" for cid in range(n_clusters)
+    )
+    label_data = _llm_call(
+        client,
+        model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 문서 분석 전문가입니다. "
+                    "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
+                    "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
+                    '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
+                ),
+            },
+            {"role": "user", "content": cluster_prompts},
+        ],
+        temperature=0.3,
+    )
     label_map: dict[int, dict] = {
         item["id"]: item for item in label_data.get("clusters", [])
     }
@@ -249,38 +287,52 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     gaps: list[GapRecommendation] = []
     roadmap: list[RoadmapPhase] | None = None
 
-    if gap_cluster_ids:
-        gap_lines = []
+    # 목표+필요영역이 있거나, 문서 내 sparse gap이 있으면 Call 2 실행
+    should_call_gap_llm = bool(goal_ctx and required_areas) or bool(gap_cluster_ids)
+
+    if should_call_gap_llm:
+        # 현재 클러스터 요약 (전체 — missing gap 판별에 사용)
+        cluster_summary_lines = "\n".join(
+            f"- {label_map.get(cid, {}).get('topic', f'클러스터 {cid}')} "
+            f"(문서 {cluster_sizes[cid]}개)"
+            for cid in range(n_clusters)
+        )
+
+        # 문서 내 sparse gap 정보
+        sparse_lines = []
         for cid in sorted(gap_cluster_ids):
             related_strong = [
                 label_map.get(r, {}).get("topic", f"클러스터 {r}")
                 for r in related_map[cid]
                 if r in strong_cluster_ids
             ]
-            gap_lines.append(
-                f"- 클러스터 {cid}: 주제={label_map.get(cid, {}).get('topic', '?')}, "
-                f"키워드={label_map.get(cid, {}).get('keywords', [])}, "
-                f"문서 수={cluster_sizes[cid]}, 심각도={severities[cid]}, "
-                f"연관된 강한 토픽={related_strong or '없음'}"
+            sparse_lines.append(
+                f"- {label_map.get(cid, {}).get('topic', '?')} "
+                f"(문서 {cluster_sizes[cid]}개, 심각도={severities[cid]}, "
+                f"연관 강한 토픽={related_strong or '없음'})"
             )
-        gap_descriptions = "\n".join(gap_lines)
+        sparse_descriptions = "\n".join(sparse_lines) if sparse_lines else "없음"
 
         if goal_ctx:
+            required_list = "\n".join(f"- {a}" for a in required_areas) if required_areas else "없음"
             user_content = (
                 f"[사용자 정보]\n{goal_ctx}\n\n"
-                f"[지식 공백 클러스터]\n{gap_descriptions}\n\n"
-                f"위 사용자의 커리어 목표를 기준으로 분석해주세요."
+                f"[목표 달성에 필요한 지식 영역]\n{required_list}\n\n"
+                f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
+                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}"
             )
             system_content = (
-                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n"
-                "사용자의 커리어 목표를 기반으로 지식 공백을 재평가하고 "
-                "학습 로드맵을 생성해주세요.\n\n"
-                "규칙:\n"
-                "1. 목표와 직결된 공백은 severity를 critical로, 무관한 공백은 low로 조정\n"
-                "2. goal_relevance는 목표와의 연관성 (high/medium/low)\n"
-                "3. roadmap은 목표 기간 안에 달성 가능한 phase별 학습 계획\n\n"
+                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n\n"
+                "분석 방법:\n"
+                "1. '필요한 지식 영역' 목록과 '현재 보유한 클러스터'를 비교하세요.\n"
+                "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing' (자료가 아예 없음)\n"
+                "   - 클러스터는 있지만 sparse gap에 포함됨 → gap_type: 'sparse' (자료가 부족함)\n"
+                "2. 목표와 직결된 공백은 severity: 'critical', 간접 관련은 'medium', 무관하면 'low'\n"
+                "3. goal_relevance는 목표와의 연관성 (high/medium/low)\n"
+                "4. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요.\n\n"
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
+                '"gap_type": "missing|sparse", '
                 '"goal_relevance": "high|medium|low", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
                 '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
@@ -288,48 +340,43 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 '"topics": ["토픽1", "토픽2"]}]}'
             )
         else:
-            user_content = f"다음 지식 공백 클러스터를 분석해주세요:\n{gap_descriptions}"
+            user_content = (
+                f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
+                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}"
+            )
             system_content = (
                 "당신은 개인 지식 관리 전문가입니다. "
-                "지식 공백(gap) 클러스터에 대해 구체적인 보완 추천을 해주세요. "
-                "심각도(critical/medium/low)와 연관된 강한 토픽 정보를 활용하세요. "
+                "문서가 부족한 클러스터에 대해 구체적인 보완 추천을 해주세요. "
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
+                '"gap_type": "sparse", '
                 '"goal_relevance": "medium", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
                 '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
                 '"roadmap": null}'
             )
 
-        try:
-            gap_response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.5,
-            )
-        except openai.AuthenticationError:
-            raise HTTPException(
-                status_code=401,
-                detail="OpenAI API 키가 올바르지 않습니다. .env 파일의 OPENAI_API_KEY를 확인해주세요.",
-            )
-        except openai.RateLimitError:
-            raise HTTPException(status_code=429, detail="OpenAI API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
-        except openai.APIConnectionError:
-            raise HTTPException(status_code=502, detail="OpenAI 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
-        except openai.OpenAIError as e:
-            raise HTTPException(status_code=502, detail=f"OpenAI API 오류: {e}")
-        gap_data = json.loads(gap_response.choices[0].message.content)
+        gap_data = _llm_call(
+            client,
+            model,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.5,
+        )
 
         gaps = [
             GapRecommendation(
                 area=item.get("area", ""),
                 severity=item.get("severity", "medium"),
+                gap_type=item.get("gap_type", "missing"),
                 goal_relevance=item.get("goal_relevance", "medium"),
-                related_strong_topic=item.get("related_strong_topic"),
+                related_strong_topic=(
+                    ", ".join(item["related_strong_topic"])
+                    if isinstance(item.get("related_strong_topic"), list)
+                    else item.get("related_strong_topic")
+                ),
                 reason=item.get("reason", ""),
                 recommendation=item.get("recommendation", ""),
             )
@@ -351,6 +398,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         goal=profile.goal,
         total_chunks=total,
         n_clusters=n_clusters,
+        required_areas=required_areas if required_areas else None,
         clusters=clusters,
         gaps=gaps,
         roadmap=roadmap,

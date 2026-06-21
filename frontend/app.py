@@ -9,6 +9,7 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 SEVERITY_EMOJI  = {"critical": "🔴", "medium": "🟡", "low": "🟢", "none": "⚪"}
 SEVERITY_LABEL  = {"critical": "긴급",  "medium": "보통",  "low": "낮음"}
 RELEVANCE_LABEL = {"high": "목표와 직결", "medium": "관련 있음", "low": "관련 낮음"}
+GAP_TYPE_LABEL  = {"missing": "⬛ 자료 없음", "sparse": "📉 자료 부족"}
 FIELD_OPTIONS   = [
     "MLOps", "LLM", "딥러닝", "머신러닝", "백엔드", "데이터 분석",
     "클라우드", "보안", "프론트엔드", "DevOps", "데이터베이스",
@@ -164,11 +165,12 @@ elif res.status_code != 200:
     st.error(f"오류 {res.status_code}: {res.text}")
     st.stop()
 
-data      = res.json()
-clusters  = data.get("clusters", [])
-gaps      = data.get("gaps", [])
-roadmap   = data.get("roadmap")
-used_goal = data.get("goal")
+data           = res.json()
+clusters       = data.get("clusters", [])
+gaps           = data.get("gaps", [])
+roadmap        = data.get("roadmap")
+used_goal      = data.get("goal")
+required_areas = data.get("required_areas")
 
 # ── 분석 기준 배너 ─────────────────────────────────────────────────────────────
 if used_goal:
@@ -180,14 +182,22 @@ else:
     )
 
 # ── 요약 지표 ──────────────────────────────────────────────────────────────────
-gap_clusters = [c for c in clusters if c["is_gap"]]
-critical_cnt = sum(1 for g in gaps if g.get("severity") == "critical")
+gap_clusters  = [c for c in clusters if c["is_gap"]]
+critical_cnt  = sum(1 for g in gaps if g.get("severity") == "critical")
+missing_cnt   = sum(1 for g in gaps if g.get("gap_type") == "missing")
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("📄 총 청크",    data["total_chunks"])
 m2.metric("🗂️ 클러스터",  data["n_clusters"])
-m3.metric("🕳️ 공백 영역", len(gap_clusters))
-m4.metric("🔴 긴급 공백", critical_cnt)
+m3.metric("🕳️ 공백 영역", len(gaps))
+m4.metric("⬛ 자료 없음",  missing_cnt)
+m5.metric("🔴 긴급 공백",  critical_cnt)
+
+if required_areas:
+    with st.expander(f"📋 목표 달성에 필요한 지식 영역 ({len(required_areas)}개)", expanded=False):
+        cols = st.columns(3)
+        for i, area in enumerate(required_areas):
+            cols[i % 3].markdown(f"- {area}")
 
 st.divider()
 
@@ -237,10 +247,12 @@ else:
         sev = gap.get("severity", "medium")
         rel = gap.get("goal_relevance", "medium")
 
+        gap_type = gap.get("gap_type", "missing")
         with st.container(border=True):
             hc, bc = st.columns([4, 1])
             with hc:
-                st.markdown(f"#### {SEVERITY_EMOJI.get(sev, '')} {gap['area']}")
+                type_badge = GAP_TYPE_LABEL.get(gap_type, "")
+                st.markdown(f"#### {SEVERITY_EMOJI.get(sev, '')} {gap['area']}  `{type_badge}`")
             with bc:
                 if used_goal:
                     st.caption(f"목표 연관성\n**{RELEVANCE_LABEL.get(rel, rel)}**")
