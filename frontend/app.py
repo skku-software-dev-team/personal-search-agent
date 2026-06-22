@@ -156,7 +156,8 @@ elif res.status_code == 401:
     st.code("OPENAI_API_KEY=sk-...  # .env 파일에 추가 후 docker compose up --build")
     st.stop()
 elif res.status_code == 429:
-    st.error("⏱️ OpenAI API 요청 한도 초과. 잠시 후 다시 시도해주세요.")
+    detail = res.json().get("detail", "API 요청 한도 초과.")
+    st.error(f"⏱️ {detail}")
     st.stop()
 elif res.status_code == 502:
     st.error(f"🌐 {res.json().get('detail', 'OpenAI API 오류가 발생했습니다.')}")

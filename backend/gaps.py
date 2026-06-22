@@ -148,8 +148,12 @@ def _llm_call(client: OpenAI, model: str, messages: list, temperature: float = 0
         return json.loads(response.choices[0].message.content)
     except openai.AuthenticationError:
         raise HTTPException(status_code=401, detail="API 키가 올바르지 않습니다. .env 파일을 확인해주세요.")
-    except openai.RateLimitError:
-        raise HTTPException(status_code=429, detail="API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+    except openai.RateLimitError as e:
+        msg = str(e)
+        import re
+        m = re.search(r'try again in (\d+m[\d.]+s)', msg)
+        wait = f" ({m.group(1)} 후 재시도)" if m else ""
+        raise HTTPException(status_code=429, detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.")
     except openai.APIConnectionError:
         raise HTTPException(status_code=502, detail="LLM 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
     except openai.OpenAIError as e:
@@ -270,17 +274,27 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     orchestrator = GapOrchestrator(client, model, ctx)
     # asyncio.to_thread: 동기 Groq API 호출이 async 이벤트 루프 블로킹 방지
     import functools
-    knowledge_map, required_areas, gap_data, agent_trace = await asyncio.to_thread(
-        functools.partial(
-            orchestrator.run,
-            gap_cluster_ids=gap_cluster_ids,
-            review_cluster_ids=review_cluster_ids,
-            severities=severities,
-            related_map=related_map,
-            strong_cluster_ids=strong_cluster_ids,
-            profile=profile,
+    try:
+        knowledge_map, required_areas, gap_data, agent_trace = await asyncio.to_thread(
+            functools.partial(
+                orchestrator.run,
+                gap_cluster_ids=gap_cluster_ids,
+                review_cluster_ids=review_cluster_ids,
+                severities=severities,
+                related_map=related_map,
+                strong_cluster_ids=strong_cluster_ids,
+                profile=profile,
+            )
         )
-    )
+    except openai.RateLimitError as e:
+        import re
+        m = re.search(r'try again in (\d+m[\d.]+s)', str(e))
+        wait = f" ({m.group(1)} 후 재시도)" if m else ""
+        raise HTTPException(status_code=429, detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.")
+    except openai.AuthenticationError:
+        raise HTTPException(status_code=401, detail="API 키가 올바르지 않습니다.")
+    except openai.APIConnectionError:
+        raise HTTPException(status_code=502, detail="LLM 서버에 연결할 수 없습니다.")
 
     label_map: dict[int, dict] = {item["id"]: item for item in knowledge_map}
 
