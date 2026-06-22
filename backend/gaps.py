@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from user_profile import UserProfile, load_profile
 router = APIRouter()
 
 RELATED_SIMILARITY_THRESHOLD = 0.6
+REVIEW_THRESHOLD_DAYS = 180  # 6개월 이상 된 클러스터 → 복습 추천
 
 
 # ── Request model ─────────────────────────────────────────────────────────────
@@ -36,12 +38,13 @@ class ClusterSummary(BaseModel):
     is_gap: bool
     severity: str             # "none" | "low" | "medium" | "critical"
     related_clusters: list[int]
+    avg_age_days: int         # 클러스터 평균 문서 나이 (일)
 
 
 class GapRecommendation(BaseModel):
     area: str
     severity: str             # "low" | "medium" | "critical"
-    gap_type: str             # "missing" | "sparse"
+    gap_type: str             # "missing" | "sparse" | "review"
     goal_relevance: str       # "high" | "medium" | "low"
     related_strong_topic: str | None
     reason: str
@@ -89,8 +92,25 @@ def _related_cluster_map(centers: np.ndarray) -> dict[int, list[int]]:
     return related
 
 
+def _cluster_avg_age_days(metadatas: list[dict]) -> int:
+    """클러스터 내 문서들의 평균 나이(일) 계산. created_at 없으면 0."""
+    now = datetime.now(timezone.utc)
+    ages = []
+    for meta in metadatas:
+        created_at = (meta or {}).get("created_at")
+        if not created_at:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ages.append((now - dt).days)
+        except (ValueError, AttributeError):
+            pass
+    return round(sum(ages) / len(ages)) if ages else 0
+
+
 def _merge_profile(request: GapsRequest) -> UserProfile:
-    """Request body overrides saved profile field by field."""
     saved = load_profile()
     return UserProfile(
         goal=request.goal if request.goal is not None else saved.goal,
@@ -144,6 +164,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
 
     docs = result.get("documents") or []
     embeddings = result.get("embeddings") or []
+    metadatas = result.get("metadatas") or []
 
     if not docs or len(docs) < 3:
         raise HTTPException(
@@ -159,8 +180,11 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     labels = kmeans.fit_predict(X)
 
     clusters_docs: dict[int, list[str]] = {i: [] for i in range(n_clusters)}
-    for doc, label in zip(docs, labels):
-        clusters_docs[int(label)].append(doc)
+    clusters_metas: dict[int, list[dict]] = {i: [] for i in range(n_clusters)}
+    for doc, meta, label in zip(docs, metadatas, labels):
+        cid = int(label)
+        clusters_docs[cid].append(doc)
+        clusters_metas[cid].append(meta or {})
 
     cluster_sizes = {cid: len(cdocs) for cid, cdocs in clusters_docs.items()}
     avg_size = total / n_clusters
@@ -177,6 +201,18 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     }
     gap_cluster_ids = {cid for cid, sev in severities.items() if sev != "none"}
 
+    # ── 시간 가중치: 오래된 클러스터 탐지 ────────────────────────────────────────
+    cluster_avg_age = {
+        cid: _cluster_avg_age_days(clusters_metas[cid])
+        for cid in range(n_clusters)
+    }
+    # sparse gap이 아닌데 오래된 클러스터 → 복습 추천 대상
+    review_cluster_ids = {
+        cid for cid in range(n_clusters)
+        if cid not in gap_cluster_ids
+        and cluster_avg_age[cid] >= REVIEW_THRESHOLD_DAYS
+    }
+
     def cluster_sample(cid: int) -> str:
         return "\n---\n".join(d[:300] for d in clusters_docs[cid][:5])
 
@@ -191,6 +227,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 is_gap=cid in gap_cluster_ids,
                 severity=severities[cid],
                 related_clusters=related_map[cid],
+                avg_age_days=cluster_avg_age[cid],
             )
             for cid in range(n_clusters)
         ]
@@ -279,6 +316,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             is_gap=cid in gap_cluster_ids,
             severity=severities[cid],
             related_clusters=related_map[cid],
+            avg_age_days=cluster_avg_age[cid],
         )
         for cid in range(n_clusters)
     ]
@@ -287,18 +325,19 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     gaps: list[GapRecommendation] = []
     roadmap: list[RoadmapPhase] | None = None
 
-    # 목표+필요영역이 있거나, 문서 내 sparse gap이 있으면 Call 2 실행
-    should_call_gap_llm = bool(goal_ctx and required_areas) or bool(gap_cluster_ids)
+    should_call_gap_llm = (
+        bool(goal_ctx and required_areas)
+        or bool(gap_cluster_ids)
+        or bool(review_cluster_ids)
+    )
 
     if should_call_gap_llm:
-        # 현재 클러스터 요약 (전체 — missing gap 판별에 사용)
         cluster_summary_lines = "\n".join(
             f"- {label_map.get(cid, {}).get('topic', f'클러스터 {cid}')} "
             f"(문서 {cluster_sizes[cid]}개)"
             for cid in range(n_clusters)
         )
 
-        # 문서 내 sparse gap 정보
         sparse_lines = []
         for cid in sorted(gap_cluster_ids):
             related_strong = [
@@ -313,46 +352,60 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             )
         sparse_descriptions = "\n".join(sparse_lines) if sparse_lines else "없음"
 
+        review_lines = []
+        for cid in sorted(review_cluster_ids):
+            age_months = round(cluster_avg_age[cid] / 30)
+            review_lines.append(
+                f"- {label_map.get(cid, {}).get('topic', '?')} "
+                f"(마지막으로 본 지 약 {age_months}개월)"
+            )
+        review_descriptions = "\n".join(review_lines) if review_lines else "없음"
+
         if goal_ctx:
             required_list = "\n".join(f"- {a}" for a in required_areas) if required_areas else "없음"
             user_content = (
                 f"[사용자 정보]\n{goal_ctx}\n\n"
                 f"[목표 달성에 필요한 지식 영역]\n{required_list}\n\n"
                 f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
-                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}"
+                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}\n\n"
+                f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
             )
             system_content = (
                 "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n\n"
                 "분석 방법:\n"
                 "1. '필요한 지식 영역' 목록과 '현재 보유한 클러스터'를 비교하세요.\n"
-                "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing' (자료가 아예 없음)\n"
-                "   - 클러스터는 있지만 sparse gap에 포함됨 → gap_type: 'sparse' (자료가 부족함)\n"
-                "2. 목표와 직결된 공백은 severity: 'critical', 간접 관련은 'medium', 무관하면 'low'\n"
-                "3. goal_relevance는 목표와의 연관성 (high/medium/low)\n"
-                "4. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요.\n\n"
+                "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing'\n"
+                "   - 클러스터는 있지만 문서가 부족함 → gap_type: 'sparse'\n"
+                "2. '오래된 클러스터'는 gap_type: 'review'로 분류하세요.\n"
+                "   - reason: '관련 자료를 마지막으로 본 지 N개월이 지났습니다. 내용을 잊었을 수 있어요.' 톤으로 작성\n"
+                "   - recommendation: '이미 알고 계신다면 넘어가도 좋지만, 한 번 훑어보시길 권합니다.' 톤으로 작성\n"
+                "3. 목표와 직결된 공백은 severity: 'critical', 간접 관련은 'medium', 무관하면 'low'\n"
+                "4. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요. review 항목은 로드맵에서 '복습' 단계로 표시.\n\n"
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
-                '"gap_type": "missing|sparse", '
+                '"gap_type": "missing|sparse|review", '
                 '"goal_relevance": "high|medium|low", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
+                '"reason": "이유", "recommendation": "추천 행동"}], '
                 '"roadmap": [{"phase": 1, "period": "1~2개월", "focus": "핵심 목표", '
                 '"topics": ["토픽1", "토픽2"]}]}'
             )
         else:
             user_content = (
                 f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
-                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}"
+                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}\n\n"
+                f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
             )
             system_content = (
-                "당신은 개인 지식 관리 전문가입니다. "
-                "문서가 부족한 클러스터에 대해 구체적인 보완 추천을 해주세요. "
+                "당신은 개인 지식 관리 전문가입니다.\n"
+                "문서가 부족한 클러스터와 오래된 클러스터에 대해 보완·복습 추천을 해주세요.\n"
+                "오래된 클러스터는 gap_type: 'review'로, 이미 알고 있을 수 있다는 점을 인정하는 부드러운 톤으로 작성하세요.\n"
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
-                '"gap_type": "sparse", '
+                '"gap_type": "sparse|review", '
                 '"goal_relevance": "medium", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "부족한 이유", "recommendation": "추천 행동"}], '
+                '"reason": "이유", "recommendation": "추천 행동"}], '
                 '"roadmap": null}'
             )
 

@@ -9,7 +9,7 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 SEVERITY_EMOJI  = {"critical": "🔴", "medium": "🟡", "low": "🟢", "none": "⚪"}
 SEVERITY_LABEL  = {"critical": "긴급",  "medium": "보통",  "low": "낮음"}
 RELEVANCE_LABEL = {"high": "목표와 직결", "medium": "관련 있음", "low": "관련 낮음"}
-GAP_TYPE_LABEL  = {"missing": "⬛ 자료 없음", "sparse": "📉 자료 부족"}
+GAP_TYPE_LABEL  = {"missing": "⬛ 자료 없음", "sparse": "📉 자료 부족", "review": "🔄 복습 추천"}
 FIELD_OPTIONS   = [
     "MLOps", "LLM", "딥러닝", "머신러닝", "백엔드", "데이터 분석",
     "클라우드", "보안", "프론트엔드", "DevOps", "데이터베이스",
@@ -185,13 +185,15 @@ else:
 gap_clusters  = [c for c in clusters if c["is_gap"]]
 critical_cnt  = sum(1 for g in gaps if g.get("severity") == "critical")
 missing_cnt   = sum(1 for g in gaps if g.get("gap_type") == "missing")
+review_cnt    = sum(1 for g in gaps if g.get("gap_type") == "review")
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("📄 총 청크",    data["total_chunks"])
 m2.metric("🗂️ 클러스터",  data["n_clusters"])
 m3.metric("🕳️ 공백 영역", len(gaps))
 m4.metric("⬛ 자료 없음",  missing_cnt)
 m5.metric("🔴 긴급 공백",  critical_cnt)
+m6.metric("🔄 복습 추천",  review_cnt)
 
 if required_areas:
     with st.expander(f"📋 목표 달성에 필요한 지식 영역 ({len(required_areas)}개)", expanded=False):
@@ -227,6 +229,7 @@ with col_table:
                 f"{SEVERITY_EMOJI.get(c['severity'], '')} "
                 f"{SEVERITY_LABEL.get(c['severity'], '정상') if c['severity'] != 'none' else '정상'}"
             ),
+            "최근성": f"🔄 {c['avg_age_days'] // 30}개월 전" if c.get("avg_age_days", 0) >= 180 else "✅ 최신",
             "키워드": " · ".join(c["keywords"][:3]),
         }
         for c in sorted_clusters
@@ -242,12 +245,19 @@ if not gaps:
     st.balloons()
     st.success("공백이 발견되지 않았습니다! 지식이 고르게 분포되어 있어요. 🎉")
 else:
+    # missing/sparse 먼저, review는 마지막 (이미 아는 내용이므로 후순위)
+    type_rank = {"missing": 0, "sparse": 1, "review": 2}
     severity_rank = {"critical": 0, "medium": 1, "low": 2}
-    for gap in sorted(gaps, key=lambda g: severity_rank.get(g.get("severity", "low"), 3)):
+    sorted_gaps = sorted(
+        gaps,
+        key=lambda g: (type_rank.get(g.get("gap_type", "missing"), 0),
+                       severity_rank.get(g.get("severity", "low"), 3)),
+    )
+    for gap in sorted_gaps:
         sev = gap.get("severity", "medium")
         rel = gap.get("goal_relevance", "medium")
-
         gap_type = gap.get("gap_type", "missing")
+
         with st.container(border=True):
             hc, bc = st.columns([4, 1])
             with hc:
@@ -257,8 +267,12 @@ else:
                 if used_goal:
                     st.caption(f"목표 연관성\n**{RELEVANCE_LABEL.get(rel, rel)}**")
 
-            st.markdown(f"📌 {gap['reason']}")
-            st.info(f"💡 {gap['recommendation']}")
+            if gap_type == "review":
+                st.markdown(f"🕐 {gap['reason']}")
+                st.warning(f"💡 {gap['recommendation']}")
+            else:
+                st.markdown(f"📌 {gap['reason']}")
+                st.info(f"💡 {gap['recommendation']}")
 
             if gap.get("related_strong_topic"):
                 st.caption(f"🔗 연관 강한 토픽: **{gap['related_strong_topic']}**")
