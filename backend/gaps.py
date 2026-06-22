@@ -48,7 +48,8 @@ class GapRecommendation(BaseModel):
     goal_relevance: str       # "high" | "medium" | "low"
     related_strong_topic: str | None
     reason: str
-    recommendation: str
+    recommendation: str       # 구체적인 실습 목표 / 마일스톤
+    resources: list[str]      # 추천 학습 자료 (책/강의/공식문서)
 
 
 class RoadmapPhase(BaseModel):
@@ -377,16 +378,27 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing'\n"
                 "   - 클러스터는 있지만 문서가 부족함 → gap_type: 'sparse'\n"
                 "2. '오래된 클러스터'는 gap_type: 'review'로 분류하세요.\n"
-                "   - reason: '관련 자료를 마지막으로 본 지 N개월이 지났습니다. 내용을 잊었을 수 있어요.' 톤으로 작성\n"
-                "   - recommendation: '이미 알고 계신다면 넘어가도 좋지만, 한 번 훑어보시길 권합니다.' 톤으로 작성\n"
+                "   - reason: '관련 자료를 마지막으로 본 지 N개월이 지났습니다. 내용을 잊었을 수 있어요.' 톤\n"
+                "   - recommendation: '이미 알고 계신다면 넘어가도 좋지만, 핵심 개념을 한 번 훑어보시길 권합니다.' 톤\n"
                 "3. 목표와 직결된 공백은 severity: 'critical', 간접 관련은 'medium', 무관하면 'low'\n"
-                "4. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요. review 항목은 로드맵에서 '복습' 단계로 표시.\n\n"
+                "4. recommendation 작성 규칙:\n"
+                "   - '~를 학습하세요' 같은 추상적 문장 금지\n"
+                "   - 구체적인 실습 목표나 마일스톤으로 작성\n"
+                "   - 예: 'Express.js로 CRUD API 직접 구현 후 Postman으로 테스트해보기'\n"
+                "   - 예: 'JWT 발급·검증 흐름을 코드로 구현하고 Refresh Token 전략까지 적용해보기'\n"
+                "5. resources: 해당 영역 학습에 적합한 자료 2~3개\n"
+                "   - 한국어 강의·책·공식문서 우선\n"
+                "   - 형식: '자료 유형 — 제목 (저자/플랫폼)'\n"
+                "   - 예: ['책 — 「HTTP 완벽 가이드」 (데이빗 고울리)', '강의 — 인프런 「모든 개발자를 위한 HTTP 웹 기본 지식」 (김영한)', '문서 — MDN Web Docs: HTTP 개요']\n"
+                "6. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요. review 항목은 '복습' 단계로 표시.\n\n"
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
                 '"gap_type": "missing|sparse|review", '
                 '"goal_relevance": "high|medium|low", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "이유", "recommendation": "추천 행동"}], '
+                '"reason": "부족한 이유 (구체적으로)", '
+                '"recommendation": "구체적인 실습 목표나 마일스톤", '
+                '"resources": ["자료1", "자료2", "자료3"]}], '
                 '"roadmap": [{"phase": 1, "period": "1~2개월", "focus": "핵심 목표", '
                 '"topics": ["토픽1", "토픽2"]}]}'
             )
@@ -399,13 +411,19 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             system_content = (
                 "당신은 개인 지식 관리 전문가입니다.\n"
                 "문서가 부족한 클러스터와 오래된 클러스터에 대해 보완·복습 추천을 해주세요.\n"
-                "오래된 클러스터는 gap_type: 'review'로, 이미 알고 있을 수 있다는 점을 인정하는 부드러운 톤으로 작성하세요.\n"
+                "오래된 클러스터는 gap_type: 'review'로, 이미 알고 있을 수 있다는 점을 인정하는 부드러운 톤으로 작성하세요.\n\n"
+                "recommendation 작성 규칙:\n"
+                "- '~를 학습하세요' 같은 추상적 문장 금지\n"
+                "- 구체적인 실습 목표나 마일스톤으로 작성\n"
+                "resources: 해당 영역 학습에 적합한 자료 2~3개 (한국어 우선, '자료 유형 — 제목 (플랫폼)' 형식)\n\n"
                 "반드시 다음 JSON 형식으로만 응답하세요:\n"
                 '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
                 '"gap_type": "sparse|review", '
                 '"goal_relevance": "medium", '
                 '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "이유", "recommendation": "추천 행동"}], '
+                '"reason": "부족한 이유 (구체적으로)", '
+                '"recommendation": "구체적인 실습 목표나 마일스톤", '
+                '"resources": ["자료1", "자료2"]}], '
                 '"roadmap": null}'
             )
 
@@ -432,6 +450,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 ),
                 reason=item.get("reason", ""),
                 recommendation=item.get("recommendation", ""),
+                resources=item.get("resources", []) if isinstance(item.get("resources"), list) else [],
             )
             for item in gap_data.get("gaps", [])
         ]

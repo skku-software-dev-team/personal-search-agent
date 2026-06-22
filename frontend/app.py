@@ -277,6 +277,12 @@ else:
             if gap.get("related_strong_topic"):
                 st.caption(f"🔗 연관 강한 토픽: **{gap['related_strong_topic']}**")
 
+            resources = gap.get("resources", [])
+            if resources:
+                with st.expander("📚 추천 학습 자료", expanded=True):
+                    for r in resources:
+                        st.markdown(f"- {r}")
+
 # ── 학습 로드맵 ────────────────────────────────────────────────────────────────
 if roadmap:
     st.divider()
