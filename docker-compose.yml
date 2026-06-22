@@ -1,6 +1,24 @@
 version: "3.9"
 
 services:
+  postgres:
+    image: postgres:15
+    container_name: psa_postgres
+    environment:
+      POSTGRES_DB: psa_db
+      POSTGRES_USER: psa_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localpassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - psa_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U psa_user -d psa_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   chromadb:
     image: chromadb/chroma:0.5.3
     container_name: psa_chromadb
@@ -34,8 +52,11 @@ services:
       - LOCAL_FOLDER_PATH=/data/local
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jhgan/ko-sroberta-multitask}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - DATABASE_URL=postgresql+asyncpg://psa_user:${POSTGRES_PASSWORD:-localpassword}@postgres:5432/psa_db
     depends_on:
       chromadb:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -56,4 +77,6 @@ services:
 
 volumes:
   psa_chroma_data:
+    driver: local
+  psa_postgres_data:
     driver: local
