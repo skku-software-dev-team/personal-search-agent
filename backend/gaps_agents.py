@@ -104,6 +104,7 @@ class AgentContext:
     # 이전 Agent 결과 (다음 Agent가 읽음)
     knowledge_map: list[dict] = field(default_factory=list)
     coverage: dict[str, dict] = field(default_factory=dict)
+    search_samples: dict[str, str] = field(default_factory=dict)  # 검색 결과 캐시
 
 
 # ── Tool 실행 ──────────────────────────────────────────────────────────────────
@@ -153,10 +154,14 @@ def _exec_search_knowledge(args: dict) -> dict:
 # ── Base Agent ─────────────────────────────────────────────────────────────────
 
 _LANG_RULE = (
-    "[언어 규칙 — 최우선] 모든 텍스트는 한국어(한글)와 영문(알파벳)만 사용하세요. "
-    "일본어 가타카나(ア・イ・ウ 등)와 히라가나(あ・い・う 등), "
-    "중국어 한자(简体·繁體)를 절대 사용하지 마세요. "
-    "외래어는 한글로 표기하세요 (예: 인프라스트럭처, 컨테이너, 쿠버네티스).\n\n"
+    "[언어 규칙 — 최우선] 반드시 한국어(한글)와 영문(알파벳)만 사용하세요. "
+    "다음 문자는 절대 사용 금지: "
+    "일본어 가타카나(ア・イ・ウ・エ・オ 등), 히라가나(あ・い・う・え・お 등), "
+    "중국어 간체(云・构・层 등), 번체(雲・構・層 등), "
+    "한국 한자(人・機・性・的 등 모든 한자). "
+    "외래어·기술용어는 반드시 한글로만 표기하세요: "
+    "architecture→아키텍처, infrastructure→인프라스트럭처, "
+    "container→컨테이너, kubernetes→쿠버네티스, cloud→클라우드.\n\n"
 )
 
 
@@ -338,6 +343,9 @@ class RequirementAgent(BaseAgent):
         if not required_areas:
             return {}
 
+        # 검색 횟수 제한 — 상위 8개만 (LLM 호출 수 감소)
+        required_areas = required_areas[:8]
+
         # Step 2: 각 영역을 search_knowledge로 실제 검색 (기존 방식에 없던 단계)
         area_list_str = "\n".join(f"- {a}" for a in required_areas)
         messages = [
@@ -361,6 +369,11 @@ class RequirementAgent(BaseAgent):
         ]
 
         tool_results = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
+
+        # 검색 결과를 ctx에 캐시 (GapRecommendAgent 재사용)
+        for r in tool_results:
+            if r["tool"] == "search_knowledge":
+                self.ctx.search_samples[r["args"]["query"]] = r["result"].get("sample", "")
 
         # tool 결과 요약 → 깔끔한 _json_call
         search_summary = "\n".join(
@@ -447,43 +460,38 @@ class GapRecommendAgent(BaseAgent):
 
         has_goal = bool(self.ctx.goal_ctx)
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    _LANG_RULE
-                    + "당신은 개인 지식 관리 및 커리어 코치 Agent입니다. "
-                    + "각 공백 영역에 대해 search_knowledge 툴로 관련 기존 문서를 먼저 조회한 뒤 "
-                    + "맥락에 맞는 구체적인 추천을 생성하세요.\n"
-                    + "recommendation 작성 규칙:\n"
-                    + "- '~를 학습하세요' 같은 추상적 문장 금지\n"
-                    + "- 구체적인 실습 목표나 마일스톤으로 작성\n"
-                    + "- 예: 'Express.js로 CRUD API 직접 구현 후 Postman으로 테스트'\n"
-                    + "review 타입은 복습 추천 톤으로 부드럽게 작성하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{self.ctx.goal_ctx or ''}\n\n"
-                    f"[목표 대비 누락/부족 영역 (RequirementAgent 검색 결과)]\n{coverage_lines}\n\n"
-                    f"[문서 부족 클러스터(sparse)]\n{sparse_lines}\n\n"
-                    f"[오래된 클러스터(review)]\n{review_lines}\n\n"
-                    "각 공백 영역에 대해 search_knowledge로 관련 기존 문서를 검색한 뒤 추천을 생성하세요."
-                ),
-            },
+        # RequirementAgent 캐시에서 이미 검색한 영역 재사용
+        cached_context = "\n".join(
+            f"- {area}: sample=\"{sample[:100]}\""
+            for area, sample in self.ctx.search_samples.items()
+        )
+
+        # 캐시에 없는 sparse/review 클러스터 토픽만 추가 검색
+        uncached_topics = [
+            label_map[cid]["topic"]
+            for cid in sorted(gap_cluster_ids | review_cluster_ids)
+            if cid in label_map and label_map[cid].get("topic") not in self.ctx.search_samples
         ]
 
-        tool_results = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
+        tool_results = []
+        if uncached_topics:
+            messages = [
+                {
+                    "role": "system",
+                    "content": _LANG_RULE + "주어진 영역을 search_knowledge로 검색하세요.",
+                },
+                {
+                    "role": "user",
+                    "content": "다음 영역을 검색하세요:\n" + "\n".join(f"- {t}" for t in uncached_topics),
+                },
+            ]
+            tool_results = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
 
-        # tool 결과 요약 → 깔끔한 _json_call
-        context_text = "\n".join(
-            f"- {r['args'].get('query')}: "
-            f"found={r['result'].get('found')}, "
-            f"sample=\"{r['result'].get('sample', '')[:100]}\""
-            for r in tool_results
-            if r["tool"] == "search_knowledge"
-        ) or "관련 문서 없음"
+        new_context = "\n".join(
+            f"- {r['args'].get('query')}: sample=\"{r['result'].get('sample', '')[:100]}\""
+            for r in tool_results if r["tool"] == "search_knowledge"
+        )
+        context_text = "\n".join(filter(None, [cached_context, new_context])) or "관련 문서 없음"
 
         json_schema = (
             '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
