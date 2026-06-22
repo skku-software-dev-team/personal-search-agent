@@ -245,43 +245,50 @@ if not gaps:
     st.balloons()
     st.success("공백이 발견되지 않았습니다! 지식이 고르게 분포되어 있어요. 🎉")
 else:
-    # missing/sparse 먼저, review는 마지막 (이미 아는 내용이므로 후순위)
-    type_rank = {"missing": 0, "sparse": 1, "review": 2}
     severity_rank = {"critical": 0, "medium": 1, "low": 2}
-    sorted_gaps = sorted(
-        gaps,
-        key=lambda g: (type_rank.get(g.get("gap_type", "missing"), 0),
-                       severity_rank.get(g.get("severity", "low"), 3)),
-    )
-    for gap in sorted_gaps:
-        sev = gap.get("severity", "medium")
-        rel = gap.get("goal_relevance", "medium")
-        gap_type = gap.get("gap_type", "missing")
 
-        with st.container(border=True):
-            hc, bc = st.columns([4, 1])
-            with hc:
-                type_badge = GAP_TYPE_LABEL.get(gap_type, "")
-                st.markdown(f"#### {SEVERITY_EMOJI.get(sev, '')} {gap['area']}  `{type_badge}`")
-            with bc:
-                if used_goal:
-                    st.caption(f"목표 연관성\n**{RELEVANCE_LABEL.get(rel, rel)}**")
+    # gap_type별로 분류
+    gaps_by_type = {"missing": [], "sparse": [], "review": []}
+    for g in gaps:
+        gaps_by_type.setdefault(g.get("gap_type", "missing"), []).append(g)
+    for bucket in gaps_by_type.values():
+        bucket.sort(key=lambda g: severity_rank.get(g.get("severity", "low"), 3))
 
-            if gap_type == "review":
-                st.markdown(f"🕐 {gap['reason']}")
-                st.warning(f"💡 {gap['recommendation']}")
-            else:
-                st.markdown(f"📌 {gap['reason']}")
-                st.info(f"💡 {gap['recommendation']}")
+    # 탭 레이블 (비어있는 탭은 숨김)
+    tab_defs = [
+        ("missing", f"⬛ 자료없음  {len(gaps_by_type['missing'])}"),
+        ("sparse",  f"📉 자료부족  {len(gaps_by_type['sparse'])}"),
+        ("review",  f"🔄 복습추천  {len(gaps_by_type['review'])}"),
+    ]
+    active_tabs = [(key, label) for key, label in tab_defs if gaps_by_type[key]]
 
-            if gap.get("related_strong_topic"):
-                st.caption(f"🔗 연관 강한 토픽: **{gap['related_strong_topic']}**")
+    tabs = st.tabs([label for _, label in active_tabs])
 
-            resources = gap.get("resources", [])
-            if resources:
-                with st.expander("📚 추천 학습 자료", expanded=True):
-                    for r in resources:
-                        st.markdown(f"- {r}")
+    for tab, (gap_type, _) in zip(tabs, active_tabs):
+        with tab:
+            for gap in gaps_by_type[gap_type]:
+                sev = gap.get("severity", "medium")
+                rel = gap.get("goal_relevance", "medium")
+                expander_label = (
+                    f"{SEVERITY_EMOJI.get(sev, '')} **{gap['area']}**"
+                    + (f"  ·  {RELEVANCE_LABEL.get(rel, rel)}" if used_goal else "")
+                )
+                with st.expander(expander_label, expanded=False):
+                    if gap_type == "review":
+                        st.markdown(f"🕐 {gap['reason']}")
+                        st.warning(f"💡 {gap['recommendation']}")
+                    else:
+                        st.markdown(f"📌 {gap['reason']}")
+                        st.info(f"💡 {gap['recommendation']}")
+
+                    if gap.get("related_strong_topic"):
+                        st.caption(f"🔗 연관 강한 토픽: **{gap['related_strong_topic']}**")
+
+                    resources = gap.get("resources", [])
+                    if resources:
+                        st.markdown("**📚 추천 학습 자료**")
+                        for r in resources:
+                            st.markdown(f"- {r}")
 
 # ── 학습 로드맵 ────────────────────────────────────────────────────────────────
 if roadmap:
