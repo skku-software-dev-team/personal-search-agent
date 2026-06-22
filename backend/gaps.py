@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from config import settings
 from db import get_collection
+from gaps_agents import AgentContext, GapOrchestrator
 from user_profile import UserProfile, load_profile
 
 router = APIRouter()
@@ -67,6 +68,7 @@ class GapsResponse(BaseModel):
     clusters: list[ClusterSummary]
     gaps: list[GapRecommendation]
     roadmap: list[RoadmapPhase] | None
+    agent_trace: list[dict] | None = None  # 각 Agent의 tool call 기록
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -253,68 +255,28 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         client = OpenAI(api_key=settings.openai_api_key)
         model = "gpt-4o-mini"
 
-    # ── Call 0: 목표 달성에 필요한 지식 영역 목록 생성 (목표 있을 때만) ───────────
-    required_areas: list[str] = []
-    if goal_ctx:
-        req_data = _llm_call(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "[언어 규칙 — 최우선] 모든 텍스트는 한국어(한글)와 영문(알파벳)만 사용하세요. "
-                        "일본어 가타카나(ア・イ・ウ 등)와 히라가나(あ・い・う 등), "
-                        "중국어 한자(简体·繁體)를 절대 사용하지 마세요. "
-                        "외래어는 한글로 표기하세요 (예: 인프라스트럭처, 컨테이너, 쿠버네티스).\n\n"
-                        "당신은 커리어 코치 전문가입니다. "
-                        "사용자의 목표를 달성하기 위해 반드시 알아야 할 핵심 지식 영역을 나열해주세요. "
-                        "각 영역은 구체적이고 학습 가능한 단위로 적어주세요. "
-                        "반드시 다음 JSON 형식으로만 응답하세요:\n"
-                        '{"required_areas": ["영역1", "영역2", ...]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{goal_ctx}\n\n"
-                        "이 목표를 달성하기 위해 반드시 알아야 할 핵심 지식 영역 10~15개를 반환해주세요. "
-                        "(예: REST API 설계, 데이터베이스 인덱싱, Docker 컨테이너화)"
-                    ),
-                },
-            ],
-            temperature=0.3,
-        )
-        required_areas = req_data.get("required_areas", [])
+    # ── Multi-Agent 오케스트레이터 ────────────────────────────────────────────────
+    # 기존: Call 0→1→2 순차 호출 (LLM이 ChromaDB 접근 불가, 추측 기반)
+    # 개선: KnowledgeMapAgent → RequirementAgent → GapRecommendAgent
+    #        각 Agent가 tool calling으로 ChromaDB 직접 조회 → 검색 기반 판정
+    ctx = AgentContext(
+        clusters_docs=clusters_docs,
+        cluster_sizes=cluster_sizes,
+        cluster_avg_age=cluster_avg_age,
+        n_clusters=n_clusters,
+        goal_ctx=goal_ctx,
+    )
+    orchestrator = GapOrchestrator(client, model, ctx)
+    knowledge_map, required_areas, gap_data, agent_trace = orchestrator.run(
+        gap_cluster_ids=gap_cluster_ids,
+        review_cluster_ids=review_cluster_ids,
+        severities=severities,
+        related_map=related_map,
+        strong_cluster_ids=strong_cluster_ids,
+        profile=profile,
+    )
 
-    # ── Call 1: topic + keywords for all clusters ─────────────────────────────
-    cluster_prompts = "\n\n".join(
-        f"[클러스터 {cid}]\n{cluster_sample(cid)}" for cid in range(n_clusters)
-    )
-    label_data = _llm_call(
-        client,
-        model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "[언어 규칙 — 최우선] 모든 텍스트는 한국어(한글)와 영문(알파벳)만 사용하세요. "
-                    "일본어 가타카나(ア・イ・ウ 등)와 히라가나(あ・い・う 등), "
-                    "중국어 한자(简体·繁體)를 절대 사용하지 마세요. "
-                    "외래어는 한글로 표기하세요 (예: 인프라스트럭처, 컨테이너, 쿠버네티스).\n\n"
-                    "당신은 문서 분석 전문가입니다. "
-                    "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
-                    "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
-                    '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
-                ),
-            },
-            {"role": "user", "content": cluster_prompts},
-        ],
-        temperature=0.3,
-    )
-    label_map: dict[int, dict] = {
-        item["id"]: item for item in label_data.get("clusters", [])
-    }
+    label_map: dict[int, dict] = {item["id"]: item for item in knowledge_map}
 
     clusters = [
         ClusterSummary(
@@ -330,157 +292,35 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         for cid in range(n_clusters)
     ]
 
-    # ── Call 2: gap recommendations + optional roadmap ────────────────────────
-    gaps: list[GapRecommendation] = []
+    gaps = [
+        GapRecommendation(
+            area=item.get("area", ""),
+            severity=item.get("severity", "medium"),
+            gap_type=item.get("gap_type", "missing"),
+            goal_relevance=item.get("goal_relevance", "medium"),
+            related_strong_topic=(
+                ", ".join(item["related_strong_topic"])
+                if isinstance(item.get("related_strong_topic"), list)
+                else item.get("related_strong_topic")
+            ),
+            reason=item.get("reason", ""),
+            recommendation=item.get("recommendation", ""),
+            resources=item.get("resources", []) if isinstance(item.get("resources"), list) else [],
+        )
+        for item in gap_data.get("gaps", [])
+    ]
+
     roadmap: list[RoadmapPhase] | None = None
-
-    should_call_gap_llm = (
-        bool(goal_ctx and required_areas)
-        or bool(gap_cluster_ids)
-        or bool(review_cluster_ids)
-    )
-
-    if should_call_gap_llm:
-        cluster_summary_lines = "\n".join(
-            f"- {label_map.get(cid, {}).get('topic', f'클러스터 {cid}')} "
-            f"(문서 {cluster_sizes[cid]}개)"
-            for cid in range(n_clusters)
-        )
-
-        sparse_lines = []
-        for cid in sorted(gap_cluster_ids):
-            related_strong = [
-                label_map.get(r, {}).get("topic", f"클러스터 {r}")
-                for r in related_map[cid]
-                if r in strong_cluster_ids
-            ]
-            sparse_lines.append(
-                f"- {label_map.get(cid, {}).get('topic', '?')} "
-                f"(문서 {cluster_sizes[cid]}개, 심각도={severities[cid]}, "
-                f"연관 강한 토픽={related_strong or '없음'})"
+    if goal_ctx and gap_data.get("roadmap"):
+        roadmap = [
+            RoadmapPhase(
+                phase=item.get("phase", i + 1),
+                period=item.get("period", ""),
+                focus=item.get("focus", ""),
+                topics=item.get("topics", []),
             )
-        sparse_descriptions = "\n".join(sparse_lines) if sparse_lines else "없음"
-
-        review_lines = []
-        for cid in sorted(review_cluster_ids):
-            age_months = round(cluster_avg_age[cid] / 30)
-            review_lines.append(
-                f"- {label_map.get(cid, {}).get('topic', '?')} "
-                f"(마지막으로 본 지 약 {age_months}개월)"
-            )
-        review_descriptions = "\n".join(review_lines) if review_lines else "없음"
-
-        if goal_ctx:
-            required_list = "\n".join(f"- {a}" for a in required_areas) if required_areas else "없음"
-            user_content = (
-                f"[사용자 정보]\n{goal_ctx}\n\n"
-                f"[목표 달성에 필요한 지식 영역]\n{required_list}\n\n"
-                f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
-                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}\n\n"
-                f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
-            )
-            system_content = (
-                "[언어 규칙 — 최우선] 모든 텍스트는 한국어(한글)와 영문(알파벳)만 사용하세요. "
-                "일본어 가타카나(ア・イ・ウ 등)와 히라가나(あ・い・う 등), "
-                "중국어 한자(简体·繁體)를 절대 사용하지 마세요. "
-                "외래어는 한글로 표기하세요 (예: 인프라스트럭처, 컨테이너, 쿠버네티스).\n\n"
-                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n\n"
-                "분석 방법:\n"
-                "1. '필요한 지식 영역' 목록과 '현재 보유한 클러스터'를 비교하세요.\n"
-                "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing'\n"
-                "   - 클러스터는 있지만 문서가 부족함 → gap_type: 'sparse'\n"
-                "2. '오래된 클러스터'는 gap_type: 'review'로 분류하세요.\n"
-                "   - reason: '관련 자료를 마지막으로 본 지 N개월이 지났습니다. 내용을 잊었을 수 있어요.' 톤\n"
-                "   - recommendation: '이미 알고 계신다면 넘어가도 좋지만, 핵심 개념을 한 번 훑어보시길 권합니다.' 톤\n"
-                "3. 목표와 직결된 공백은 severity: 'critical', 간접 관련은 'medium', 무관하면 'low'\n"
-                "4. recommendation 작성 규칙:\n"
-                "   - '~를 학습하세요' 같은 추상적 문장 금지\n"
-                "   - 구체적인 실습 목표나 마일스톤으로 작성\n"
-                "   - 예: 'Express.js로 CRUD API 직접 구현 후 Postman으로 테스트해보기'\n"
-                "   - 예: 'JWT 발급·검증 흐름을 코드로 구현하고 Refresh Token 전략까지 적용해보기'\n"
-                "5. resources: 해당 영역 학습에 적합한 자료 2~3개\n"
-                "   - 한국어 강의·책·공식문서 우선\n"
-                "   - 형식: '자료 유형 — 제목 (저자/플랫폼)'\n"
-                "   - 예: ['책 — 「HTTP 완벽 가이드」 (데이빗 고울리)', '강의 — 인프런 「모든 개발자를 위한 HTTP 웹 기본 지식」 (김영한)', '문서 — MDN Web Docs: HTTP 개요']\n"
-                "6. 목표 기간에 맞는 phase별 학습 로드맵을 생성하세요. review 항목은 '복습' 단계로 표시.\n\n"
-                "반드시 다음 JSON 형식으로만 응답하세요:\n"
-                '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
-                '"gap_type": "missing|sparse|review", '
-                '"goal_relevance": "high|medium|low", '
-                '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "부족한 이유 (구체적으로)", '
-                '"recommendation": "구체적인 실습 목표나 마일스톤", '
-                '"resources": ["자료1", "자료2", "자료3"]}], '
-                '"roadmap": [{"phase": 1, "period": "1~2개월", "focus": "핵심 목표", '
-                '"topics": ["토픽1", "토픽2"]}]}'
-            )
-        else:
-            user_content = (
-                f"[현재 보유한 문서 클러스터]\n{cluster_summary_lines}\n\n"
-                f"[문서가 부족한 클러스터(sparse)]\n{sparse_descriptions}\n\n"
-                f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
-            )
-            system_content = (
-                "[언어 규칙 — 최우선] 모든 텍스트는 한국어(한글)와 영문(알파벳)만 사용하세요. "
-                "일본어 가타카나(ア・イ・ウ 등)와 히라가나(あ・い・う 등), "
-                "중국어 한자(简体·繁體)를 절대 사용하지 마세요. "
-                "외래어는 한글로 표기하세요 (예: 인프라스트럭처, 컨테이너, 쿠버네티스).\n\n"
-                "당신은 개인 지식 관리 전문가입니다. "
-                "문서가 부족한 클러스터와 오래된 클러스터에 대해 보완·복습 추천을 해주세요.\n"
-                "오래된 클러스터는 gap_type: 'review'로, 이미 알고 있을 수 있다는 점을 인정하는 부드러운 톤으로 작성하세요.\n\n"
-                "recommendation 작성 규칙:\n"
-                "- '~를 학습하세요' 같은 추상적 문장 금지\n"
-                "- 구체적인 실습 목표나 마일스톤으로 작성\n"
-                "resources: 해당 영역 학습에 적합한 자료 2~3개 (한국어 우선, '자료 유형 — 제목 (플랫폼)' 형식)\n\n"
-                "반드시 다음 JSON 형식으로만 응답하세요:\n"
-                '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
-                '"gap_type": "sparse|review", '
-                '"goal_relevance": "medium", '
-                '"related_strong_topic": "연관 토픽명 또는 null", '
-                '"reason": "부족한 이유 (구체적으로)", '
-                '"recommendation": "구체적인 실습 목표나 마일스톤", '
-                '"resources": ["자료1", "자료2"]}], '
-                '"roadmap": null}'
-            )
-
-        gap_data = _llm_call(
-            client,
-            model,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.5,
-        )
-
-        gaps = [
-            GapRecommendation(
-                area=item.get("area", ""),
-                severity=item.get("severity", "medium"),
-                gap_type=item.get("gap_type", "missing"),
-                goal_relevance=item.get("goal_relevance", "medium"),
-                related_strong_topic=(
-                    ", ".join(item["related_strong_topic"])
-                    if isinstance(item.get("related_strong_topic"), list)
-                    else item.get("related_strong_topic")
-                ),
-                reason=item.get("reason", ""),
-                recommendation=item.get("recommendation", ""),
-                resources=item.get("resources", []) if isinstance(item.get("resources"), list) else [],
-            )
-            for item in gap_data.get("gaps", [])
+            for i, item in enumerate(gap_data["roadmap"])
         ]
-
-        if goal_ctx and gap_data.get("roadmap"):
-            roadmap = [
-                RoadmapPhase(
-                    phase=item.get("phase", i + 1),
-                    period=item.get("period", ""),
-                    focus=item.get("focus", ""),
-                    topics=item.get("topics", []),
-                )
-                for i, item in enumerate(gap_data["roadmap"])
-            ]
 
     return GapsResponse(
         goal=profile.goal,
@@ -490,4 +330,5 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         clusters=clusters,
         gaps=gaps,
         roadmap=roadmap,
+        agent_trace=agent_trace if agent_trace else None,
     )

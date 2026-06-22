@@ -290,6 +290,33 @@ else:
                         for r in resources:
                             st.markdown(f"- {r}")
 
+# ── Agent 분석 로그 ────────────────────────────────────────────────────────────
+agent_trace = data.get("agent_trace")
+if agent_trace:
+    with st.expander(f"🤖 Agent 분석 로그 ({len(agent_trace)}회 tool 호출)", expanded=False):
+        st.caption(
+            "각 Agent가 ChromaDB에 직접 조회한 기록입니다. "
+            "기존 방식(순차 LLM 호출)과 달리 Agent가 필요한 정보를 능동적으로 검색합니다."
+        )
+        agent_colors = {
+            "KnowledgeMapAgent": "🗂️",
+            "RequirementAgent": "🔍",
+            "GapRecommendAgent": "💡",
+        }
+        for log in agent_trace:
+            agent = log.get("agent", "")
+            tool = log.get("tool", "")
+            args = log.get("args", {})
+            result = log.get("result", "")
+            icon = agent_colors.get(agent, "🤖")
+            st.markdown(
+                f"{icon} **{agent}** → `{tool}` "
+                f"({', '.join(f'{k}={v}' for k, v in args.items())})"
+            )
+            st.caption(f"↳ {result}")
+
+st.divider()
+
 # ── 학습 로드맵 ────────────────────────────────────────────────────────────────
 if roadmap:
     st.divider()
