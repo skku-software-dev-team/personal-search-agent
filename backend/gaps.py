@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -267,13 +268,18 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         goal_ctx=goal_ctx,
     )
     orchestrator = GapOrchestrator(client, model, ctx)
-    knowledge_map, required_areas, gap_data, agent_trace = orchestrator.run(
-        gap_cluster_ids=gap_cluster_ids,
-        review_cluster_ids=review_cluster_ids,
-        severities=severities,
-        related_map=related_map,
-        strong_cluster_ids=strong_cluster_ids,
-        profile=profile,
+    # asyncio.to_thread: 동기 Groq API 호출이 async 이벤트 루프 블로킹 방지
+    import functools
+    knowledge_map, required_areas, gap_data, agent_trace = await asyncio.to_thread(
+        functools.partial(
+            orchestrator.run,
+            gap_cluster_ids=gap_cluster_ids,
+            review_cluster_ids=review_cluster_ids,
+            severities=severities,
+            related_map=related_map,
+            strong_cluster_ids=strong_cluster_ids,
+            profile=profile,
+        )
     )
 
     label_map: dict[int, dict] = {item["id"]: item for item in knowledge_map}

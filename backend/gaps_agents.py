@@ -162,7 +162,7 @@ _LANG_RULE = (
 
 class BaseAgent:
     name: str = "BaseAgent"
-    max_tool_iter: int = 12
+    max_tool_iter: int = 6  # Groq 무료 rate limit 고려
 
     def __init__(self, client: OpenAI, model: str, ctx: AgentContext):
         self.client = client
@@ -177,8 +177,9 @@ class BaseAgent:
             return _exec_search_knowledge(args)
         return {"error": f"unknown tool: {fn_name}"}
 
-    def _tool_loop(self, messages: list, tools: list) -> list:
-        """Tool calling 루프. model이 stop할 때까지 tool 호출 반복."""
+    def _tool_loop(self, messages: list, tools: list) -> list[dict]:
+        """Tool calling 루프. 수집된 tool 결과 목록 반환."""
+        collected: list[dict] = []
         for _ in range(self.max_tool_iter):
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -195,6 +196,7 @@ class BaseAgent:
             for tc in choice.message.tool_calls:
                 args = json.loads(tc.function.arguments)
                 result = self._execute_tool(tc.function.name, args)
+                collected.append({"tool": tc.function.name, "args": args, "result": result})
                 self.tool_logs.append({
                     "agent": self.name,
                     "tool": tc.function.name,
@@ -206,13 +208,16 @@ class BaseAgent:
                     "tool_call_id": tc.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
-        return messages
+        return collected
 
-    def _json_call(self, messages: list, temperature: float = 0.3) -> dict:
-        """Tool 없이 JSON 출력만 요청."""
+    def _json_call(self, system: str, user: str, temperature: float = 0.3) -> dict:
+        """깔끔한 메시지로 JSON 출력 요청 (tool 이력 없음 → 안정적)."""
         resp = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user + "\n\n반드시 올바른 JSON으로만 응답하세요."},
+            ],
             response_format={"type": "json_object"},
             temperature=temperature,
         )
@@ -266,17 +271,27 @@ class KnowledgeMapAgent(BaseAgent):
             },
         ]
 
-        messages = self._tool_loop(messages, [GET_CLUSTER_SAMPLE_TOOL])
+        tool_results = self._tool_loop(messages, [GET_CLUSTER_SAMPLE_TOOL])
 
-        messages.append({
-            "role": "user",
-            "content": (
-                "분석한 모든 클러스터 정보를 다음 JSON 형식으로 응답하세요:\n"
+        # tool 결과 요약 → 깔끔한 _json_call로 분석
+        samples_text = "\n\n".join(
+            f"[클러스터 {r['args'].get('cluster_id')}]\n"
+            f"문서 수: {r['result'].get('doc_count')}, "
+            f"평균 나이: {r['result'].get('avg_age_days')}일\n"
+            f"샘플:\n{r['result'].get('sample', '')}"
+            for r in tool_results
+            if r["tool"] == "get_cluster_sample" and "error" not in r["result"]
+        ) or "클러스터 샘플 없음"
+
+        result = self._json_call(
+            system=_LANG_RULE + "당신은 문서 분석 전문가입니다.",
+            user=(
+                f"다음 클러스터 샘플을 분석해 주제와 키워드를 추출하세요:\n\n"
+                f"{samples_text}\n\n"
+                "반드시 다음 JSON 형식으로 응답하세요:\n"
                 '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
             ),
-        })
-
-        result = self._json_call(messages)
+        )
         knowledge_map = result.get("clusters", [])
         self.ctx.knowledge_map = knowledge_map
         return knowledge_map
@@ -309,25 +324,15 @@ class RequirementAgent(BaseAgent):
         )
 
         # Step 1: 필요 영역 목록 생성 (tool 없이 빠르게)
-        areas_raw = self._json_call([
-            {
-                "role": "system",
-                "content": (
-                    _LANG_RULE
-                    + "당신은 커리어 코치 전문가입니다. "
-                    + "사용자 목표 달성에 필요한 핵심 지식 영역을 나열하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{self.ctx.goal_ctx}\n"
-                    f"현재 보유 토픽: {topic_list}\n\n"
-                    "이 목표 달성에 필요한 지식 영역 10~15개를 반환하세요.\n"
-                    '{"required_areas": ["영역1", "영역2", ...]}'
-                ),
-            },
-        ])
+        areas_raw = self._json_call(
+            system=_LANG_RULE + "당신은 커리어 코치 전문가입니다. 사용자 목표 달성에 필요한 핵심 지식 영역을 나열하세요.",
+            user=(
+                f"{self.ctx.goal_ctx}\n"
+                f"현재 보유 토픽: {topic_list}\n\n"
+                "이 목표 달성에 필요한 지식 영역 10~15개를 반환하세요.\n"
+                '{"required_areas": ["영역1", "영역2", ...]}'
+            ),
+        )
         required_areas = areas_raw.get("required_areas", [])
 
         if not required_areas:
@@ -355,18 +360,27 @@ class RequirementAgent(BaseAgent):
             },
         ]
 
-        messages = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
+        tool_results = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
 
-        messages.append({
-            "role": "user",
-            "content": (
-                "검색 결과를 바탕으로 각 영역의 커버리지를 다음 JSON으로 응답하세요:\n"
+        # tool 결과 요약 → 깔끔한 _json_call
+        search_summary = "\n".join(
+            f"- {r['args'].get('query')}: found={r['result'].get('found')}, "
+            f"score={r['result'].get('coverage_score', 0):.2f}"
+            for r in tool_results
+            if r["tool"] == "search_knowledge"
+        ) or "검색 결과 없음"
+
+        result = self._json_call(
+            system=_LANG_RULE + "당신은 지식 커버리지 분석 전문가입니다.",
+            user=(
+                f"필요 영역 목록:\n{area_list_str}\n\n"
+                f"ChromaDB 검색 결과:\n{search_summary}\n\n"
+                "검색 결과를 바탕으로 각 영역의 커버리지를 판정하세요 "
+                "(coverage_score > 0.5 → covered, 0.3~0.5 → partial, 미만 → missing):\n"
                 '{"coverage": [{"area": "영역명", "status": "missing|partial|covered", '
                 '"coverage_score": 0.0}]}'
             ),
-        })
-
-        result = self._json_call(messages)
+        )
         coverage = {
             item["area"]: {
                 "status": item.get("status", "missing"),
@@ -460,7 +474,16 @@ class GapRecommendAgent(BaseAgent):
             },
         ]
 
-        messages = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
+        tool_results = self._tool_loop(messages, [SEARCH_KNOWLEDGE_TOOL])
+
+        # tool 결과 요약 → 깔끔한 _json_call
+        context_text = "\n".join(
+            f"- {r['args'].get('query')}: "
+            f"found={r['result'].get('found')}, "
+            f"sample=\"{r['result'].get('sample', '')[:100]}\""
+            for r in tool_results
+            if r["tool"] == "search_knowledge"
+        ) or "관련 문서 없음"
 
         json_schema = (
             '{"gaps": [{"area": "공백 영역", "severity": "critical|medium|low", '
@@ -474,12 +497,23 @@ class GapRecommendAgent(BaseAgent):
                if has_goal else '"roadmap": null}')
         )
 
-        messages.append({
-            "role": "user",
-            "content": f"수집한 정보를 바탕으로 다음 JSON 형식으로 응답하세요:\n{json_schema}",
-        })
-
-        return self._json_call(messages, temperature=0.5)
+        return self._json_call(
+            system=(
+                _LANG_RULE
+                + "당신은 개인 지식 관리 및 커리어 코치 전문가입니다. "
+                + "recommendation은 추상적 문장이 아닌 구체적 실습 목표로 작성하세요. "
+                + "review 타입은 복습 추천 톤으로 부드럽게 작성하세요."
+            ),
+            user=(
+                f"{self.ctx.goal_ctx or ''}\n\n"
+                f"[목표 대비 누락/부족 영역]\n{coverage_lines}\n\n"
+                f"[문서 부족 클러스터(sparse)]\n{sparse_lines}\n\n"
+                f"[오래된 클러스터(review)]\n{review_lines}\n\n"
+                f"[관련 기존 문서 검색 결과 (GapRecommendAgent 수집)]\n{context_text}\n\n"
+                f"다음 JSON 형식으로 응답하세요:\n{json_schema}"
+            ),
+            temperature=0.5,
+        )
 
 
 # ── GapOrchestrator ───────────────────────────────────────────────────────────
