@@ -1,8 +1,9 @@
-import streamlit as st
-import httpx
 import os
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
+
+import httpx
+import plotly.graph_objects as go
+import streamlit as st
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -27,7 +28,7 @@ if st.button("타임라인 생성"):
     with st.spinner("AI가 문서 분석 중..."):
         try:
             res = httpx.get(
-                f"{BACKEND_URL}/api/timeline",
+                f"{BACKEND_URL}/timeline",
                 params={
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
@@ -46,29 +47,38 @@ if st.button("타임라인 생성"):
                 fig = go.Figure()
 
                 # 세로 연결선
-                fig.add_trace(go.Scatter(
-                    x=[0] * n, y=y,
-                    mode="lines",
-                    line=dict(color="#CBD5E1", width=2),
-                    hoverinfo="none",
-                    showlegend=False,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=[0] * n,
+                        y=y,
+                        mode="lines",
+                        line=dict(color="#CBD5E1", width=2),
+                        hoverinfo="none",
+                        showlegend=False,
+                    )
+                )
 
                 # 동그라미 노드
-                fig.add_trace(go.Scatter(
-                    x=[0] * n, y=y,
-                    mode="markers",
-                    marker=dict(size=18, color="#4F8EF7", line=dict(color="white", width=2)),
-                    hoverinfo="none",
-                    showlegend=False,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=[0] * n,
+                        y=y,
+                        mode="markers",
+                        marker=dict(
+                            size=18, color="#4F8EF7", line=dict(color="white", width=2)
+                        ),
+                        hoverinfo="none",
+                        showlegend=False,
+                    )
+                )
 
                 # 키워드 + 한줄요약
                 for i, item in enumerate(timeline):
                     yi = y[i]
                     # 키워드 (크게)
                     fig.add_annotation(
-                        x=0.08, y=yi + 0.15,
+                        x=0.08,
+                        y=yi + 0.15,
                         text=f"<b>{item.get('keyword', '')}</b>",
                         showarrow=False,
                         font=dict(size=15, color="#1a1a1a"),
@@ -77,7 +87,8 @@ if st.button("타임라인 생성"):
                     )
                     # 한줄요약 (작게)
                     fig.add_annotation(
-                        x=0.08, y=yi - 0.15,
+                        x=0.08,
+                        y=yi - 0.15,
                         text=f"<span style='color:#888'>{item.get('summary', '')}</span>",
                         showarrow=False,
                         font=dict(size=11, color="#888"),

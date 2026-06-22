@@ -25,18 +25,10 @@ class SearchResponse(BaseModel):
     total: int
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Core search logic (search.py 라우트와 chat.py가 함께 재사용) ──────────────────
 
-@router.get("/search", response_model=SearchResponse)
-async def search(
-    q: str = Query(..., description="검색 쿼리"),
-    top_k: int = Query(10, ge=1, le=50, description="반환할 최대 결과 수"),
-    source: str | None = Query(None, description="소스 필터 (local | gdrive | notion)"),
-):
-    if not q.strip():
-        raise HTTPException(status_code=422, detail="검색어를 입력해주세요.")
-
-    query_vector = get_model().encode([q], show_progress_bar=False).tolist()
+def search_documents(query: str, top_k: int = 10, source: str | None = None) -> list[SearchResult]:
+    query_vector = get_model().encode([query], show_progress_bar=False).tolist()
 
     where = {"source": source} if source else None
 
@@ -47,7 +39,7 @@ async def search(
         include=["documents", "metadatas", "distances"],
     )
 
-    results = [
+    return [
         SearchResult(
             text=doc,
             source=meta.get("source", ""),
@@ -64,4 +56,17 @@ async def search(
         )
     ]
 
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.get("/search", response_model=SearchResponse)
+async def search(
+    q: str = Query(..., description="검색 쿼리"),
+    top_k: int = Query(10, ge=1, le=50, description="반환할 최대 결과 수"),
+    source: str | None = Query(None, description="소스 필터 (local | gdrive | notion)"),
+):
+    if not q.strip():
+        raise HTTPException(status_code=422, detail="검색어를 입력해주세요.")
+
+    results = search_documents(q, top_k=top_k, source=source)
     return SearchResponse(query=q, results=results, total=len(results))

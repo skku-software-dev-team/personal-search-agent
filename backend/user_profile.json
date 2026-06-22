@@ -1,6 +1,8 @@
 {
-  "goal": null,
-  "fields": [],
-  "level": null,
-  "timeline": null
+  "goal": "보안 엔지니어",
+  "fields": [
+    "보안"
+  ],
+  "level": "취준생",
+  "timeline": "3개월"
 }

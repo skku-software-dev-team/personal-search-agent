@@ -1,16 +1,11 @@
 import os
 
 import httpx
-import pandas as pd
 import streamlit as st
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
-SEVERITY_EMOJI  = {"critical": "🔴", "medium": "🟡", "low": "🟢", "none": "⚪"}
-SEVERITY_LABEL  = {"critical": "긴급",  "medium": "보통",  "low": "낮음"}
-RELEVANCE_LABEL = {"high": "목표와 직결", "medium": "관련 있음", "low": "관련 낮음"}
-GAP_TYPE_LABEL  = {"missing": "⬛ 자료 없음", "sparse": "📉 자료 부족"}
-FIELD_OPTIONS   = [
+FIELD_OPTIONS = [
     "MLOps", "LLM", "딥러닝", "머신러닝", "백엔드", "데이터 분석",
     "클라우드", "보안", "프론트엔드", "DevOps", "데이터베이스",
 ]
@@ -22,7 +17,6 @@ st.set_page_config(
     page_icon="🧠",
     layout="wide",
 )
-
 
 # ── 최초 방문 시 저장된 프로필 자동 로드 ──────────────────────────────────────
 if "profile_loaded" not in st.session_state:
@@ -36,7 +30,6 @@ if "profile_loaded" not in st.session_state:
     st.session_state["s_level"]    = p.get("level") if p.get("level") in LEVELS else "취준생"
     st.session_state["s_timeline"] = p.get("timeline") if p.get("timeline") in TIMELINES else "6개월"
     st.session_state["profile_loaded"] = True
-
 
 # ── 사이드바: 커리어 목표 ─────────────────────────────────────────────────────
 with st.sidebar:
@@ -98,183 +91,73 @@ with st.sidebar:
     st.divider()
     try:
         r = httpx.get(f"{BACKEND_URL}/health", timeout=3)
-        if r.status_code == 200:
-            st.success("🟢 백엔드 연결됨")
-        else:
-            st.error("🔴 백엔드 응답 오류")
+        st.success("🟢 백엔드 연결됨") if r.status_code == 200 else st.error("🔴 백엔드 응답 오류")
     except Exception:
         st.error("🔴 백엔드 연결 안됨")
 
 
-# ── 메인: 지식 공백 분석 ──────────────────────────────────────────────────────
-st.title("🕳️ 지식 공백 분석")
-st.caption(
-    "문서를 KMeans로 클러스터링해 학습이 부족한 영역을 찾고, "
-    "커리어 목표에 맞는 학습 로드맵을 제안합니다."
+# ── 메인: 홈 ──────────────────────────────────────────────────────────────────
+st.title("🧠 Personal Knowledge OS")
+st.markdown(
+    "내가 공부한 문서들을 AI로 분석해 **지식 지도**를 만들고, "
+    "**공백을 찾고**, **성장을 추적**합니다."
 )
 
-with st.expander("⚙️ 이번 분석만 다른 목표 사용하기", expanded=False):
-    override_goal = st.text_input(
-        "목표 override",
-        placeholder="비워두면 사이드바 목표 자동 사용",
-        label_visibility="collapsed",
-    )
-
-run = st.button("🔍 지식 공백 분석 시작", type="primary", use_container_width=True)
-
-if not run:
-    st.stop()
-
-# ── 요청 본문 구성 ─────────────────────────────────────────────────────────────
-if override_goal.strip():
-    # override만 전송 → 나머지는 백엔드에서 저장된 프로필 사용
-    request_body: dict = {"goal": override_goal.strip()}
-elif goal.strip():
-    request_body = {
-        "goal": goal.strip(),
-        "fields": fields,
-        "level": level,
-        "timeline": timeline,
-    }
+if st.session_state["s_goal"]:
+    st.info(f"🎯 현재 목표: **{st.session_state['s_goal']}** ({st.session_state['s_level']} · {st.session_state['s_timeline']})")
 else:
-    request_body = {}
-
-# ── API 호출 ───────────────────────────────────────────────────────────────────
-with st.spinner("클러스터링 & AI 분석 중... (10~30초)"):
-    try:
-        res = httpx.post(f"{BACKEND_URL}/gaps", json=request_body, timeout=120)
-    except Exception as e:
-        st.error(f"요청 실패: {e}")
-        st.stop()
-
-if res.status_code == 422:
-    st.warning(f"⚠️ {res.json().get('detail', '문서가 부족합니다.')}")
-    st.info("먼저 `POST /ingest/local` 또는 `POST /ingest`로 문서를 등록해주세요.")
-    st.stop()
-elif res.status_code == 401:
-    st.error("🔑 OpenAI API 키가 올바르지 않습니다.")
-    st.code("OPENAI_API_KEY=sk-...  # .env 파일에 추가 후 docker compose up --build")
-    st.stop()
-elif res.status_code == 429:
-    st.error("⏱️ OpenAI API 요청 한도 초과. 잠시 후 다시 시도해주세요.")
-    st.stop()
-elif res.status_code == 502:
-    st.error(f"🌐 {res.json().get('detail', 'OpenAI API 오류가 발생했습니다.')}")
-    st.stop()
-elif res.status_code != 200:
-    st.error(f"오류 {res.status_code}: {res.text}")
-    st.stop()
-
-data           = res.json()
-clusters       = data.get("clusters", [])
-gaps           = data.get("gaps", [])
-roadmap        = data.get("roadmap")
-used_goal      = data.get("goal")
-required_areas = data.get("required_areas")
-
-# ── 분석 기준 배너 ─────────────────────────────────────────────────────────────
-if used_goal:
-    st.success(f"🎯 **{used_goal}** 목표 기준으로 분석했습니다.")
-else:
-    st.info(
-        "📄 목표 없이 문서 기반으로만 분석했습니다. "
-        "사이드바에서 커리어 목표를 설정하면 맞춤 추천과 로드맵을 받을 수 있어요."
-    )
-
-# ── 요약 지표 ──────────────────────────────────────────────────────────────────
-gap_clusters  = [c for c in clusters if c["is_gap"]]
-critical_cnt  = sum(1 for g in gaps if g.get("severity") == "critical")
-missing_cnt   = sum(1 for g in gaps if g.get("gap_type") == "missing")
-
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("📄 총 청크",    data["total_chunks"])
-m2.metric("🗂️ 클러스터",  data["n_clusters"])
-m3.metric("🕳️ 공백 영역", len(gaps))
-m4.metric("⬛ 자료 없음",  missing_cnt)
-m5.metric("🔴 긴급 공백",  critical_cnt)
-
-if required_areas:
-    with st.expander(f"📋 목표 달성에 필요한 지식 영역 ({len(required_areas)}개)", expanded=False):
-        cols = st.columns(3)
-        for i, area in enumerate(required_areas):
-            cols[i % 3].markdown(f"- {area}")
+    st.warning("사이드바에서 커리어 목표를 설정하면 맞춤 분석을 받을 수 있어요.")
 
 st.divider()
 
-# ── 클러스터 분포 ──────────────────────────────────────────────────────────────
-st.subheader("📊 클러스터별 문서 분포")
+# ── 기능 카드 ─────────────────────────────────────────────────────────────────
+st.subheader("기능")
 
-sorted_clusters = sorted(clusters, key=lambda x: x["doc_count"], reverse=True)
+col1, col2, col3 = st.columns(3)
 
-col_chart, col_table = st.columns([1, 1])
+with col1:
+    with st.container(border=True):
+        st.markdown("### 🕳️ 지식 공백 분석")
+        st.markdown(
+            "문서를 클러스터링해 내가 약한 영역을 찾고 "
+            "커리어 목표에 맞는 학습 로드맵을 제안합니다."
+        )
+        st.page_link("pages/1_gaps.py", label="분석 시작 →", use_container_width=True)
 
-with col_chart:
-    df_chart = pd.DataFrame([
-        {
-            "주제": (c["topic"][:14] + "…" if len(c["topic"]) > 14 else c["topic"]),
-            "문서 수": c["doc_count"],
-        }
-        for c in sorted_clusters
-    ])
-    st.bar_chart(df_chart.set_index("주제"), color="#5470C6", height=300)
+with col2:
+    with st.container(border=True):
+        st.markdown("### 📈 지적 성장 타임라인")
+        st.markdown(
+            "기간별로 어떤 주제를 공부했는지 "
+            "시간 흐름에 따라 시각화합니다."
+        )
+        st.page_link("pages/2_timeline.py", label="타임라인 보기 →", use_container_width=True)
 
-with col_table:
-    rows = [
-        {
-            "주제":   c["topic"],
-            "문서 수": c["doc_count"],
-            "상태":   (
-                f"{SEVERITY_EMOJI.get(c['severity'], '')} "
-                f"{SEVERITY_LABEL.get(c['severity'], '정상') if c['severity'] != 'none' else '정상'}"
-            ),
-            "키워드": " · ".join(c["keywords"][:3]),
-        }
-        for c in sorted_clusters
-    ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+with col3:
+    with st.container(border=True):
+        st.markdown("### 👤 포트폴리오 생성")
+        st.markdown(
+            "내 문서를 기반으로 AI가 자동으로 "
+            "기술 스택과 프로젝트 이력을 정리합니다."
+        )
+        st.page_link("pages/3_portfolio.py", label="포트폴리오 만들기 →", use_container_width=True)
 
-st.divider()
+col4, col5 = st.columns(2)
 
-# ── 공백 추천 ──────────────────────────────────────────────────────────────────
-st.subheader("🕳️ 지식 공백 & 추천")
+with col4:
+    with st.container(border=True):
+        st.markdown("### 💬 문서와 대화")
+        st.markdown(
+            "내 문서를 RAG로 검색해 "
+            "질문에 근거 기반으로 답변합니다."
+        )
+        st.page_link("pages/4_chat.py", label="채팅 시작 →", use_container_width=True)
 
-if not gaps:
-    st.balloons()
-    st.success("공백이 발견되지 않았습니다! 지식이 고르게 분포되어 있어요. 🎉")
-else:
-    severity_rank = {"critical": 0, "medium": 1, "low": 2}
-    for gap in sorted(gaps, key=lambda g: severity_rank.get(g.get("severity", "low"), 3)):
-        sev = gap.get("severity", "medium")
-        rel = gap.get("goal_relevance", "medium")
-
-        gap_type = gap.get("gap_type", "missing")
-        with st.container(border=True):
-            hc, bc = st.columns([4, 1])
-            with hc:
-                type_badge = GAP_TYPE_LABEL.get(gap_type, "")
-                st.markdown(f"#### {SEVERITY_EMOJI.get(sev, '')} {gap['area']}  `{type_badge}`")
-            with bc:
-                if used_goal:
-                    st.caption(f"목표 연관성\n**{RELEVANCE_LABEL.get(rel, rel)}**")
-
-            st.markdown(f"📌 {gap['reason']}")
-            st.info(f"💡 {gap['recommendation']}")
-
-            if gap.get("related_strong_topic"):
-                st.caption(f"🔗 연관 강한 토픽: **{gap['related_strong_topic']}**")
-
-# ── 학습 로드맵 ────────────────────────────────────────────────────────────────
-if roadmap:
-    st.divider()
-    st.subheader(f"🗺️ 학습 로드맵 — {used_goal} ({timeline})")
-
-    phase_cols = st.columns(len(roadmap))
-    for phase, col in zip(roadmap, phase_cols):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**Phase {phase['phase']}**")
-                st.caption(f"📅 {phase['period']}")
-                st.markdown(f"**{phase['focus']}**")
-                st.markdown("---")
-                for topic in phase.get("topics", []):
-                    st.markdown(f"- {topic}")
+with col5:
+    with st.container(border=True):
+        st.markdown("### 🔍 문서 검색")
+        st.markdown(
+            "키워드가 아닌 의미 기반 벡터 검색으로 "
+            "관련 문서를 빠르게 찾습니다."
+        )
+        st.page_link("pages/5_search.py", label="검색하기 →", use_container_width=True)
