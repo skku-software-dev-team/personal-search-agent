@@ -1,9 +1,13 @@
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_openai import ChatOpenAI
-from langchain.tools import tool
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from db import get_collection
 import json
+
+from db import get_collection
+from fastapi import APIRouter
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.tools import tool
+from langchain_openai import ChatOpenAI
+
+router = APIRouter()
 
 
 @tool
@@ -31,32 +35,34 @@ def get_documents_by_period(start_date: str, end_date: str) -> str:
 
     docs = []
     for doc, meta in zip(results["documents"], results["metadatas"]):
-        docs.append({
-            "title": meta.get("title", "제목없음"),
-            "date": meta.get("created_at", "날짜없음"),
-            "content": doc[:300],
-        })
+        docs.append(
+            {
+                "title": meta.get("title", "제목없음"),
+                "date": meta.get("created_at", "날짜없음"),
+                "content": doc[:300],
+            }
+        )
     return json.dumps(docs, ensure_ascii=False)
+
 
 @tool
 def get_date_range() -> str:
     """
-    ChromaDB에 저장된 문서들의 전체 날짜 범위를 반환합니다.
+    ChromaDB에 저장된 문서들의 전체 날짜 범위를 반환합니다s.
     """
     collection = get_collection()
     results = collection.get(include=["metadatas"])
-    dates = [
-        m.get("created_at")
-        for m in results["metadatas"]
-        if m.get("created_at")
-    ]
+    dates = [m.get("created_at") for m in results["metadatas"] if m.get("created_at")]
     if not dates:
         return "문서 없음"
-    return json.dumps({
-        "earliest": min(dates),
-        "latest": max(dates),
-        "total_docs": len(dates),
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "earliest": min(dates),
+            "latest": max(dates),
+            "total_docs": len(dates),
+        },
+        ensure_ascii=False,
+    )
 
 
 def build_timeline_agent() -> AgentExecutor:
@@ -64,8 +70,11 @@ def build_timeline_agent() -> AgentExecutor:
 
     tools = [get_date_range, get_documents_by_period]
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
     당신은 사용자의 문서를 분석해서 지적 성장 타임라인을 만드는 AI입니다.
 
     순서:
@@ -79,27 +88,39 @@ def build_timeline_agent() -> AgentExecutor:
         {{"keyword": "핵심키워드", "summary": "한줄요약"}}
     ]
     }}
-    """),
-        MessagesPlaceholder("agent_scratchpad"),
-        ("human", "{input}"),
-    ])
+    """,
+            ),
+            MessagesPlaceholder("agent_scratchpad"),
+            ("human", "{input}"),
+        ]
+    )
     agent = create_openai_tools_agent(llm, tools, prompt)
     return AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 
 async def generate_timeline(start_date: str, end_date: str) -> dict:
     agent = build_timeline_agent()
-    result = await agent.ainvoke({
-        "input": f"{start_date} 부터 {end_date} 까지의 문서를 분석해서 지적 성장 타임라인을 만들어줘"
-    })
-    
+    result = await agent.ainvoke(
+        {
+            "input": f"{start_date} 부터 {end_date} 까지의 문서를 분석해서 지적 성장 타임라인을 만들어줘"
+        }
+    )
+
     print("=== Agent 응답 ===")
     print(result["output"])
     print("=================")
-    
-    import re, json
+
+    import json
+    import re
+
     output = result["output"]
-    match = re.search(r'\{.*\}', output, re.DOTALL)
+    match = re.search(r"\{.*\}", output, re.DOTALL)
     if match:
         return json.loads(match.group())
     return {"timeline": []}
+
+
+@router.get("/timeline")
+async def timeline(start_date: str, end_date: str):
+    result = await generate_timeline(start_date, end_date)
+    return result
