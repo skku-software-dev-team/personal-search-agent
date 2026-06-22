@@ -263,7 +263,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 {
                     "role": "system",
                     "content": (
-                        "당신은 커리어 코치 전문가입니다. "
+                        "당신은 커리어 코치 전문가입니다. 반드시 한국어로만 응답하세요. "
                         "사용자의 목표를 달성하기 위해 반드시 알아야 할 핵심 지식 영역을 나열해주세요. "
                         "각 영역은 구체적이고 학습 가능한 단위로 적어주세요. "
                         "반드시 다음 JSON 형식으로만 응답하세요:\n"
@@ -294,7 +294,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             {
                 "role": "system",
                 "content": (
-                    "당신은 문서 분석 전문가입니다. "
+                    "당신은 문서 분석 전문가입니다. 반드시 한국어로만 응답하세요. "
                     "각 클러스터의 주제와 핵심 키워드를 추출해주세요. "
                     "반드시 다음 JSON 형식으로만 응답하세요 (다른 텍스트 없이):\n"
                     '{"clusters": [{"id": 0, "topic": "주제", "keywords": ["k1","k2","k3"]}]}'
@@ -372,7 +372,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
             )
             system_content = (
-                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다.\n\n"
+                "당신은 개인 지식 관리 및 커리어 코치 전문가입니다. 반드시 한국어로만 응답하세요.\n\n"
                 "분석 방법:\n"
                 "1. '필요한 지식 영역' 목록과 '현재 보유한 클러스터'를 비교하세요.\n"
                 "   - 클러스터에 해당 영역이 없음 → gap_type: 'missing'\n"
@@ -409,7 +409,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
                 f"[오래된 클러스터 — 복습 추천 대상]\n{review_descriptions}"
             )
             system_content = (
-                "당신은 개인 지식 관리 전문가입니다.\n"
+                "당신은 개인 지식 관리 전문가입니다. 반드시 한국어로만 응답하세요.\n"
                 "문서가 부족한 클러스터와 오래된 클러스터에 대해 보완·복습 추천을 해주세요.\n"
                 "오래된 클러스터는 gap_type: 'review'로, 이미 알고 있을 수 있다는 점을 인정하는 부드러운 톤으로 작성하세요.\n\n"
                 "recommendation 작성 규칙:\n"
