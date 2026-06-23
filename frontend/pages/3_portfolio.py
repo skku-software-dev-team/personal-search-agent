@@ -3,6 +3,7 @@ from datetime import datetime
 
 import requests
 import streamlit as st
+from utils.auth import require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -10,6 +11,7 @@ st.set_page_config(page_title="Portfolio", page_icon="👤", layout="wide")
 
 st.title("👤 포트폴리오")
 st.caption("ChromaDB에 저장된 문서를 기반으로 AI가 포트폴리오를 자동 생성합니다.")
+require_login()
 
 # 사이드바 설정
 with st.sidebar:

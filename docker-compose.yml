@@ -53,6 +53,12 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jhgan/ko-sroberta-multitask}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - DATABASE_URL=postgresql+asyncpg://psa_user:${POSTGRES_PASSWORD:-localpassword}@postgres:5432/psa_db
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
+      - FRONTEND_CALLBACK_URL=${FRONTEND_CALLBACK_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     depends_on:
       chromadb:
         condition: service_healthy

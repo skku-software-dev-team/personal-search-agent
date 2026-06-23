@@ -2,22 +2,30 @@ import os
 
 import httpx
 import streamlit as st
+from utils.auth import require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
-SOURCE_OPTIONS = {"전체": None, "로컬 파일": "local", "Google Drive": "gdrive", "Notion": "notion"}
+SOURCE_OPTIONS = {
+    "전체": None,
+    "로컬 파일": "local",
+    "Google Drive": "gdrive",
+    "Notion": "notion",
+}
 SCORE_COLOR = {(0.8, 1.0): "🟢", (0.6, 0.8): "🟡", (0.0, 0.6): "🔴"}
 
 st.set_page_config(page_title="문서 검색", page_icon="🔍", layout="wide")
 st.title("🔍 문서 검색")
 st.caption("의미 기반 벡터 검색으로 관련 문서를 찾아줍니다.")
-
+require_login()
 with st.form("search_form"):
     col_q, col_k, col_src = st.columns([4, 1, 1])
     query = col_q.text_input("검색어", placeholder="예: 머신러닝 모델 배포 방법")
     top_k = col_k.number_input("최대 결과", min_value=1, max_value=50, value=10)
     source_label = col_src.selectbox("소스 필터", list(SOURCE_OPTIONS.keys()))
-    submitted = st.form_submit_button("🔍 검색", type="primary", use_container_width=True)
+    submitted = st.form_submit_button(
+        "🔍 검색", type="primary", use_container_width=True
+    )
 
 if not submitted:
     st.stop()
@@ -64,7 +72,9 @@ for i, r in enumerate(results):
         col_info, col_score = st.columns([5, 1])
         with col_info:
             st.markdown(f"**{r['file_name']}**")
-            st.caption(f"📁 {r['file_path']}  ·  소스: `{r['source']}`  ·  청크 #{r['chunk_index']}  ·  {r.get('created_at', '')}")
+            st.caption(
+                f"📁 {r['file_path']}  ·  소스: `{r['source']}`  ·  청크 #{r['chunk_index']}  ·  {r.get('created_at', '')}"
+            )
         with col_score:
             st.metric("유사도", f"{score:.2f}", delta=None, label_visibility="visible")
             st.markdown(dot)

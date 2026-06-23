@@ -2,13 +2,14 @@ import os
 
 import httpx
 import streamlit as st
+from utils.auth import require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
 st.set_page_config(page_title="채팅", page_icon="💬")
 st.title("💬 내 문서와 대화하기")
 st.caption("질문하면 관련 문서를 찾아 근거와 함께 답변해줘요.")
-
+require_login()
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
@@ -29,9 +30,14 @@ if question:
     with st.chat_message("assistant"):
         with st.spinner("검색하고 답변 작성 중..."):
             try:
-                res = httpx.post(f"{BACKEND_URL}/chat", json={"question": question}, timeout=60)
+                res = httpx.post(
+                    f"{BACKEND_URL}/chat", json={"question": question}, timeout=60
+                )
                 if res.status_code == 503:
-                    answer, sources = "LLM API 키가 설정되지 않았습니다. `.env`에 OPENAI_API_KEY 또는 GROQ_API_KEY를 추가해주세요.", []
+                    answer, sources = (
+                        "LLM API 키가 설정되지 않았습니다. `.env`에 OPENAI_API_KEY 또는 GROQ_API_KEY를 추가해주세요.",
+                        [],
+                    )
                 elif res.status_code != 200:
                     answer, sources = f"오류 {res.status_code}: {res.text}", []
                 else:
@@ -46,4 +52,6 @@ if question:
                 for s in sources:
                     st.caption(f"[{s['source']}] {s['file_name']} — {s['file_path']}")
 
-    st.session_state.chat_messages.append({"role": "assistant", "content": answer, "sources": sources})
+    st.session_state.chat_messages.append(
+        {"role": "assistant", "content": answer, "sources": sources}
+    )

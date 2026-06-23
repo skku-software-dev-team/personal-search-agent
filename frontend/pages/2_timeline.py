@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import httpx
 import plotly.graph_objects as go
 import streamlit as st
+from utils.auth import require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -17,7 +18,7 @@ PERIOD_OPTIONS = {
 
 st.set_page_config(page_title="타임라인", page_icon="📈")
 st.title("📈 지적 성장 타임라인")
-
+require_login()
 period = st.selectbox("기간 선택", list(PERIOD_OPTIONS.keys()))
 
 if st.button("타임라인 생성"):
