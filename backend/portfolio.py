@@ -2,21 +2,16 @@ import json
 import os
 from typing import Optional
 
-import chromadb
-from fastapi import APIRouter
+from auth.dependencies import get_current_user
+from database.models import User
+from db import get_collection
+from fastapi import APIRouter, Depends
 from openai import OpenAI
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-def get_chroma_client():
-    return chromadb.HttpClient(
-        host=os.getenv("CHROMA_HOST", "psa_chromadb"),
-        port=int(os.getenv("CHROMA_PORT", 8001)),
-    )
 
 
 class PortfolioRequest(BaseModel):
@@ -40,12 +35,12 @@ class PortfolioResponse(BaseModel):
 
 
 @router.post("/generate", response_model=PortfolioResponse)
-async def generate_portfolio(req: PortfolioRequest):
+async def generate_portfolio(
+    req: PortfolioRequest, current_user: User = Depends(get_current_user)
+):
     # 1. ChromaDB에서 문서 수집
-    chroma = get_chroma_client()
-
     try:
-        collection = chroma.get_collection("documents")
+        collection = get_collection(current_user.id)
         results = collection.get(limit=req.max_docs, include=["documents", "metadatas"])
         docs = results.get("documents", [])
         metas = results.get("metadatas", [])

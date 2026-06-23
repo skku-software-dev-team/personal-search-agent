@@ -11,6 +11,11 @@ def get_token() -> str:
     return st.session_state.get("jwt_token", "")
 
 
+def auth_headers() -> dict:
+    token = get_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def logout():
     st.session_state.clear()
     st.switch_page("pages/_login.py")

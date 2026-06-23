@@ -2,7 +2,7 @@ import os
 
 import httpx
 import streamlit as st
-from utils.auth import require_login
+from utils.auth import auth_headers, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -40,7 +40,9 @@ with st.spinner("벡터 검색 중..."):
         src = SOURCE_OPTIONS[source_label]
         if src:
             params["source"] = src
-        res = httpx.get(f"{BACKEND_URL}/search", params=params, timeout=30)
+        res = httpx.get(
+            f"{BACKEND_URL}/search", params=params, headers=auth_headers(), timeout=30
+        )
     except Exception as e:
         st.error(f"요청 실패: {e}")
         st.stop()

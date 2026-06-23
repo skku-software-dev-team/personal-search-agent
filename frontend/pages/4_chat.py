@@ -2,7 +2,7 @@ import os
 
 import httpx
 import streamlit as st
-from utils.auth import require_login
+from utils.auth import auth_headers, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -31,7 +31,10 @@ if question:
         with st.spinner("검색하고 답변 작성 중..."):
             try:
                 res = httpx.post(
-                    f"{BACKEND_URL}/chat", json={"question": question}, timeout=60
+                    f"{BACKEND_URL}/chat",
+                    json={"question": question},
+                    headers=auth_headers(),
+                    timeout=60,
                 )
                 if res.status_code == 503:
                     answer, sources = (

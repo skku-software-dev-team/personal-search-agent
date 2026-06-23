@@ -1,9 +1,9 @@
 import os
 from datetime import datetime
 
-import requests
+import httpx
 import streamlit as st
-from utils.auth import require_login
+from utils.auth import auth_headers, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -23,9 +23,10 @@ with st.sidebar:
 if st.button("🚀 포트폴리오 생성", type="primary", use_container_width=True):
     with st.spinner("ChromaDB 검색 중 + AI 분석 중..."):
         try:
-            res = requests.post(
+            res = httpx.post(
                 f"{BACKEND_URL}/portfolio/generate",
                 json={"user_name": user_name, "max_docs": max_docs},
+                headers=auth_headers(),
                 timeout=60,
             )
             res.raise_for_status()

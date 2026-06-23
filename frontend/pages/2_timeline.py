@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import httpx
 import plotly.graph_objects as go
 import streamlit as st
-from utils.auth import require_login
+from utils.auth import auth_headers, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -34,6 +34,7 @@ if st.button("타임라인 생성"):
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
                 },
+                headers=auth_headers(),
                 timeout=60,
             )
             data = res.json()

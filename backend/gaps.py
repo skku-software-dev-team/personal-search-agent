@@ -2,17 +2,18 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+import numpy as np
+import openai
+from auth.dependencies import get_current_user
+from config import settings
+from database.models import User
+from db import get_collection
+from fastapi import APIRouter, Depends, HTTPException
+from gaps_agents import AgentContext, GapOrchestrator
+from openai import OpenAI
 from pydantic import BaseModel
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import openai
-from openai import OpenAI
-
-from config import settings
-from db import get_collection
-from gaps_agents import AgentContext, GapOrchestrator
 from user_profile import UserProfile, load_profile
 
 router = APIRouter()
@@ -23,6 +24,7 @@ REVIEW_THRESHOLD_DAYS = 180  # 6개월 이상 된 클러스터 → 복습 추천
 
 # ── Request model ─────────────────────────────────────────────────────────────
 
+
 class GapsRequest(BaseModel):
     goal: str | None = None
     fields: list[str] = []
@@ -32,26 +34,27 @@ class GapsRequest(BaseModel):
 
 # ── Response models ───────────────────────────────────────────────────────────
 
+
 class ClusterSummary(BaseModel):
     cluster_id: int
     topic: str
     keywords: list[str]
     doc_count: int
     is_gap: bool
-    severity: str             # "none" | "low" | "medium" | "critical"
+    severity: str  # "none" | "low" | "medium" | "critical"
     related_clusters: list[int]
-    avg_age_days: int         # 클러스터 평균 문서 나이 (일)
+    avg_age_days: int  # 클러스터 평균 문서 나이 (일)
 
 
 class GapRecommendation(BaseModel):
     area: str
-    severity: str             # "low" | "medium" | "critical"
-    gap_type: str             # "missing" | "sparse" | "review"
-    goal_relevance: str       # "high" | "medium" | "low"
+    severity: str  # "low" | "medium" | "critical"
+    gap_type: str  # "missing" | "sparse" | "review"
+    goal_relevance: str  # "high" | "medium" | "low"
     related_strong_topic: str | None
     reason: str
-    recommendation: str       # 구체적인 실습 목표 / 마일스톤
-    resources: list[str]      # 추천 학습 자료 (책/강의/공식문서)
+    recommendation: str  # 구체적인 실습 목표 / 마일스톤
+    resources: list[str]  # 추천 학습 자료 (책/강의/공식문서)
 
 
 class RoadmapPhase(BaseModel):
@@ -73,6 +76,7 @@ class GapsResponse(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _gap_severity(doc_count: int, avg: float, has_related_strong: bool) -> str:
     if doc_count < avg * 0.3 and has_related_strong:
@@ -137,7 +141,9 @@ def _goal_context(profile: UserProfile) -> str | None:
     return "\n".join(lines)
 
 
-def _llm_call(client: OpenAI, model: str, messages: list, temperature: float = 0.3) -> dict:
+def _llm_call(
+    client: OpenAI, model: str, messages: list, temperature: float = 0.3
+) -> dict:
     try:
         response = client.chat.completions.create(
             model=model,
@@ -147,27 +153,40 @@ def _llm_call(client: OpenAI, model: str, messages: list, temperature: float = 0
         )
         return json.loads(response.choices[0].message.content)
     except openai.AuthenticationError:
-        raise HTTPException(status_code=401, detail="API 키가 올바르지 않습니다. .env 파일을 확인해주세요.")
+        raise HTTPException(
+            status_code=401,
+            detail="API 키가 올바르지 않습니다. .env 파일을 확인해주세요.",
+        )
     except openai.RateLimitError as e:
         msg = str(e)
         import re
-        m = re.search(r'try again in (\d+m[\d.]+s)', msg)
+
+        m = re.search(r"try again in (\d+m[\d.]+s)", msg)
         wait = f" ({m.group(1)} 후 재시도)" if m else ""
-        raise HTTPException(status_code=429, detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.",
+        )
     except openai.APIConnectionError:
-        raise HTTPException(status_code=502, detail="LLM 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
+        raise HTTPException(
+            status_code=502,
+            detail="LLM 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.",
+        )
     except openai.OpenAIError as e:
         raise HTTPException(status_code=502, detail=f"LLM API 오류: {e}")
 
 
 # ── Route ─────────────────────────────────────────────────────────────────────
 
+
 @router.post("/gaps", response_model=GapsResponse)
-async def post_gaps(body: GapsRequest = GapsRequest()):
+async def post_gaps(
+    body: GapsRequest = GapsRequest(), current_user: User = Depends(get_current_user)
+):
     profile = _merge_profile(body)
     goal_ctx = _goal_context(profile)
 
-    collection = get_collection()
+    collection = get_collection(current_user.id)
     result = collection.get(include=["embeddings", "documents", "metadatas"])
 
     docs = result.get("documents") or []
@@ -211,14 +230,13 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
 
     # ── 시간 가중치: 오래된 클러스터 탐지 ────────────────────────────────────────
     cluster_avg_age = {
-        cid: _cluster_avg_age_days(clusters_metas[cid])
-        for cid in range(n_clusters)
+        cid: _cluster_avg_age_days(clusters_metas[cid]) for cid in range(n_clusters)
     }
     # sparse gap이 아닌데 오래된 클러스터 → 복습 추천 대상
     review_cluster_ids = {
-        cid for cid in range(n_clusters)
-        if cid not in gap_cluster_ids
-        and cluster_avg_age[cid] >= REVIEW_THRESHOLD_DAYS
+        cid
+        for cid in range(n_clusters)
+        if cid not in gap_cluster_ids and cluster_avg_age[cid] >= REVIEW_THRESHOLD_DAYS
     }
 
     def cluster_sample(cid: int) -> str:
@@ -274,6 +292,7 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
     orchestrator = GapOrchestrator(client, model, ctx)
     # asyncio.to_thread: 동기 Groq API 호출이 async 이벤트 루프 블로킹 방지
     import functools
+
     try:
         knowledge_map, required_areas, gap_data, agent_trace = await asyncio.to_thread(
             functools.partial(
@@ -288,9 +307,13 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
         )
     except openai.RateLimitError as e:
         import re
-        m = re.search(r'try again in (\d+m[\d.]+s)', str(e))
+
+        m = re.search(r"try again in (\d+m[\d.]+s)", str(e))
         wait = f" ({m.group(1)} 후 재시도)" if m else ""
-        raise HTTPException(status_code=429, detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Groq 일일 토큰 한도 초과{wait}. 내일 다시 시도해주세요.",
+        )
     except openai.AuthenticationError:
         raise HTTPException(status_code=401, detail="API 키가 올바르지 않습니다.")
     except openai.APIConnectionError:
@@ -325,7 +348,11 @@ async def post_gaps(body: GapsRequest = GapsRequest()):
             ),
             reason=item.get("reason", ""),
             recommendation=item.get("recommendation", ""),
-            resources=item.get("resources", []) if isinstance(item.get("resources"), list) else [],
+            resources=(
+                item.get("resources", [])
+                if isinstance(item.get("resources"), list)
+                else []
+            ),
         )
         for item in gap_data.get("gaps", [])
     ]

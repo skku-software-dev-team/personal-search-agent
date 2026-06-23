@@ -5,13 +5,14 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from pydantic import BaseModel
-
+from auth.dependencies import get_current_user
 from config import settings
+from database.models import User
 from db import get_collection
 from embeddings import get_model
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -20,12 +21,14 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 
 def _parse_pdf(data: bytes) -> str:
     import pypdf
+
     reader = pypdf.PdfReader(io.BytesIO(data))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _parse_docx(data: bytes) -> str:
     import docx
+
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
         f.write(data)
         tmp = f.name
@@ -39,6 +42,7 @@ def _parse_docx(data: bytes) -> str:
 def _parse_md(data: bytes) -> str:
     import markdown
     from bs4 import BeautifulSoup
+
     html = markdown.markdown(data.decode("utf-8", errors="replace"))
     return BeautifulSoup(html, "html.parser").get_text()
 
@@ -62,7 +66,7 @@ def extract_text(data: bytes, ext: str) -> str:
     return parser(data)
 
 
-def ingest_document(text: str, doc_id_key: str, metadata: dict) -> int:
+def ingest_document(text: str, doc_id_key: str, metadata: dict, user_id: str) -> int:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
@@ -78,11 +82,14 @@ def ingest_document(text: str, doc_id_key: str, metadata: dict) -> int:
     ids = [f"{source_hash}_{i}" for i in range(len(chunks))]
     metadatas = [{**metadata, "chunk_index": i} for i in range(len(chunks))]
 
-    get_collection().upsert(documents=chunks, embeddings=embeddings, ids=ids, metadatas=metadatas)
+    get_collection(user_id).upsert(
+        documents=chunks, embeddings=embeddings, ids=ids, metadatas=metadatas
+    )
     return len(chunks)
 
 
 # ── Response models ───────────────────────────────────────────────────────────
+
 
 class IngestResponse(BaseModel):
     status: str
@@ -103,8 +110,11 @@ class LocalIngestResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
 @router.post("/ingest", response_model=IngestResponse)
-async def ingest_file(file: UploadFile = File(...)):
+async def ingest_file(
+    file: UploadFile = File(...), current_user: User = Depends(get_current_user)
+):
     ext = Path(file.filename or "").suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
@@ -128,7 +138,9 @@ async def ingest_file(file: UploadFile = File(...)):
         "file_path": file.filename,
         "created_at": datetime.now(timezone.utc).date().isoformat(),
     }
-    n = ingest_document(text, doc_id_key=file.filename, metadata=metadata)
+    n = ingest_document(
+        text, doc_id_key=file.filename, metadata=metadata, user_id=current_user.id
+    )
     return IngestResponse(
         status="ok",
         source="upload",
@@ -139,7 +151,7 @@ async def ingest_file(file: UploadFile = File(...)):
 
 
 @router.post("/ingest/local", response_model=LocalIngestResponse)
-async def ingest_local():
+async def ingest_local(current_user: User = Depends(get_current_user)):
     folder = Path(settings.local_folder_path)
     if not folder.exists():
         raise HTTPException(status_code=404, detail=f"Local folder not found: {folder}")
@@ -165,9 +177,12 @@ async def ingest_local():
             continue
 
         try:
-            created_at = int(datetime.fromtimestamp(
-                path.stat().st_mtime, tz=timezone.utc
-            ).date().isoformat().replace("-", ""))
+            created_at = int(
+                datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+                .date()
+                .isoformat()
+                .replace("-", "")
+            )
         except Exception:
             created_at = datetime.now(timezone.utc).date().isoformat()
 
@@ -177,7 +192,9 @@ async def ingest_local():
             "file_path": str(path),
             "created_at": created_at,
         }
-        total_chunks += ingest_document(text, doc_id_key=str(path), metadata=metadata)
+        total_chunks += ingest_document(
+            text, doc_id_key=str(path), metadata=metadata, user_id=current_user.id
+        )
         files_processed += 1
 
     return LocalIngestResponse(

@@ -3,7 +3,7 @@ import os
 import httpx
 import pandas as pd
 import streamlit as st
-from utils.auth import require_login
+from utils.auth import auth_headers, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -36,7 +36,7 @@ require_login()
 # ── 최초 방문 시 저장된 프로필 자동 로드 ──────────────────────────────────────
 if "profile_loaded" not in st.session_state:
     try:
-        r = httpx.get(f"{BACKEND_URL}/user/profile", timeout=3)
+        r = httpx.get(f"{BACKEND_URL}/user/profile", headers=auth_headers(), timeout=3)
         p = r.json() if r.status_code == 200 else {}
     except Exception:
         p = {}
@@ -87,7 +87,12 @@ with st.sidebar:
             "timeline": timeline,
         }
         try:
-            r = httpx.post(f"{BACKEND_URL}/user/profile", json=payload, timeout=5)
+            r = httpx.post(
+                f"{BACKEND_URL}/user/profile",
+                json=payload,
+                headers=auth_headers(),
+                timeout=5,
+            )
             if r.status_code == 200:
                 st.session_state.update(
                     {
@@ -105,7 +110,9 @@ with st.sidebar:
 
     if c2.button("🔄 불러오기", use_container_width=True):
         try:
-            r = httpx.get(f"{BACKEND_URL}/user/profile", timeout=3)
+            r = httpx.get(
+                f"{BACKEND_URL}/user/profile", headers=auth_headers(), timeout=3
+            )
             if r.status_code == 200:
                 p = r.json()
                 st.session_state.update(
@@ -175,7 +182,12 @@ else:
 # ── API 호출 ───────────────────────────────────────────────────────────────────
 with st.spinner("클러스터링 & AI 분석 중... (10~30초)"):
     try:
-        res = httpx.post(f"{BACKEND_URL}/gaps", json=request_body, timeout=120)
+        res = httpx.post(
+            f"{BACKEND_URL}/gaps",
+            json=request_body,
+            headers=auth_headers(),
+            timeout=120,
+        )
     except Exception as e:
         st.error(f"요청 실패: {e}")
         st.stop()

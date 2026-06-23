@@ -2,7 +2,7 @@ import os
 
 import httpx
 import streamlit as st
-from utils.auth import logout, require_login
+from utils.auth import auth_headers, logout, require_login
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
@@ -35,7 +35,9 @@ def home():
     # ── 최초 방문 시 저장된 프로필 자동 로드 ──────────────────────────────────────
     if "profile_loaded" not in st.session_state:
         try:
-            r = httpx.get(f"{BACKEND_URL}/user/profile", timeout=3)
+            r = httpx.get(
+                f"{BACKEND_URL}/user/profile", headers=auth_headers(), timeout=3
+            )
             p = r.json() if r.status_code == 200 else {}
         except Exception:
             p = {}
@@ -86,7 +88,12 @@ def home():
                 "timeline": timeline,
             }
             try:
-                r = httpx.post(f"{BACKEND_URL}/user/profile", json=payload, timeout=5)
+                r = httpx.post(
+                    f"{BACKEND_URL}/user/profile",
+                    json=payload,
+                    headers=auth_headers(),
+                    timeout=5,
+                )
                 if r.status_code == 200:
                     st.session_state.update(
                         {
@@ -104,7 +111,9 @@ def home():
 
         if c2.button("🔄 불러오기", use_container_width=True):
             try:
-                r = httpx.get(f"{BACKEND_URL}/user/profile", timeout=3)
+                r = httpx.get(
+                    f"{BACKEND_URL}/user/profile", headers=auth_headers(), timeout=3
+                )
                 if r.status_code == 200:
                     p = r.json()
                     st.session_state.update(
