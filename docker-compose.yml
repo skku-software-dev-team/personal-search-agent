@@ -25,14 +25,12 @@ services:
     volumes:
       - ./backend:/app
       - ${LOCAL_FOLDER_PATH:-./sample_docs}:/data/local:ro
-      - ${GDRIVE_CREDS_PATH:-~/.config/mcp-gdrive}:/app/gdrive_creds
     environment:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN:-psa-local-token}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
-      - NOTION_API_KEY=${NOTION_API_KEY}
       - LOCAL_FOLDER_PATH=/data/local
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jhgan/ko-sroberta-multitask}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}

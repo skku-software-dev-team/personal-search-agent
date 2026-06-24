@@ -12,9 +12,6 @@ class AppSettings(BaseSettings):
     chunk_overlap: int = 64
     openai_api_key: str = ""
     groq_api_key: str = ""
-    notion_api_key: str = ""
-    gdrive_credentials_path: str = "/app/gdrive_creds/credentials.json"
-    gdrive_token_path: str = "/app/gdrive_creds/token.json"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

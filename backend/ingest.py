@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import io
 import os
@@ -102,15 +101,6 @@ class LocalIngestResponse(BaseModel):
     collection: str
 
 
-class ExternalIngestResponse(BaseModel):
-    status: str
-    source: str
-    pages_processed: int
-    pages_skipped: int
-    chunks_ingested: int
-    collection: str
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -195,97 +185,6 @@ async def ingest_local():
         source="local",
         files_processed=files_processed,
         files_skipped=files_skipped,
-        chunks_ingested=total_chunks,
-        collection=settings.collection_name,
-    )
-
-
-@router.post("/ingest/notion", response_model=ExternalIngestResponse)
-async def ingest_notion():
-    if not settings.notion_api_key:
-        raise HTTPException(status_code=503, detail="NOTION_API_KEY가 설정되지 않았습니다.")
-
-    from ingest_notion import fetch_all_pages
-
-    try:
-        pages = await asyncio.to_thread(fetch_all_pages, settings.notion_api_key)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Notion API 오류: {e}")
-
-    processed, skipped, total_chunks = 0, 0, 0
-    for page in pages:
-        text = page["text"].strip()
-        if not text:
-            skipped += 1
-            continue
-        metadata = {
-            "source": "notion",
-            "file_name": page["title"],
-            "file_path": page["url"],
-            "created_at": int(page["last_edited"].replace("-", "")) if page["last_edited"] else 0,
-        }
-        total_chunks += ingest_document(text, doc_id_key=page["page_id"], metadata=metadata)
-        processed += 1
-
-    return ExternalIngestResponse(
-        status="ok",
-        source="notion",
-        pages_processed=processed,
-        pages_skipped=skipped,
-        chunks_ingested=total_chunks,
-        collection=settings.collection_name,
-    )
-
-
-@router.post("/ingest/gdrive", response_model=ExternalIngestResponse)
-async def ingest_gdrive(folder_id: str | None = None):
-    from ingest_gdrive import download_file, get_drive_service, get_extension, list_files
-
-    try:
-        service = await asyncio.to_thread(
-            get_drive_service, settings.gdrive_credentials_path, settings.gdrive_token_path
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Google Drive 인증 오류: {e}")
-
-    try:
-        files = await asyncio.to_thread(list_files, service, folder_id)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Google Drive 파일 목록 오류: {e}")
-
-    processed, skipped, total_chunks = 0, 0, 0
-    for f in files:
-        ext = get_extension(f["mimeType"])
-        if ext not in SUPPORTED_EXTENSIONS:
-            skipped += 1
-            continue
-        try:
-            data = await asyncio.to_thread(download_file, service, f["id"], f["mimeType"])
-            text = extract_text(data, ext).strip()
-        except Exception:
-            skipped += 1
-            continue
-        if not text:
-            skipped += 1
-            continue
-
-        modified = f.get("modifiedTime", "")[:10].replace("-", "")
-        metadata = {
-            "source": "gdrive",
-            "file_name": f["name"],
-            "file_path": f"gdrive://{f['id']}",
-            "created_at": int(modified) if modified else 0,
-        }
-        total_chunks += ingest_document(text, doc_id_key=f["id"], metadata=metadata)
-        processed += 1
-
-    return ExternalIngestResponse(
-        status="ok",
-        source="gdrive",
-        pages_processed=processed,
-        pages_skipped=skipped,
         chunks_ingested=total_chunks,
         collection=settings.collection_name,
     )

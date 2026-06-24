@@ -14,5 +14,4 @@ chroma_data/
 
 *.log
 
-.docs/client_secret*.json
-client_secret*.json
+.docs/
