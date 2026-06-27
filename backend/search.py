@@ -14,7 +14,7 @@ class SearchResult(BaseModel):
     source: str      # "local" | "gdrive" | "notion"
     file_name: str
     file_path: str
-    created_at: str
+    created_at: str | int
     chunk_index: int
     score: float     # 코사인 유사도 (0~1, 높을수록 유사)
 

@@ -69,7 +69,16 @@ def ingest_document(text: str, doc_id_key: str, metadata: dict) -> int:
         chunk_overlap=settings.chunk_overlap,
         separators=["\n\n", "\n", ".", " ", ""],
     )
-    chunks = splitter.split_text(text)
+    import re
+    # strip control chars and null bytes that break the Rust tokenizer
+    def _clean(s: str) -> str:
+        s = s.replace("\x00", "")
+        s = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", s)
+        return " ".join(s.split())
+
+    raw = splitter.split_text(text[:200_000])  # cap at 200k chars (~400 chunks max)
+    chunks = [_clean(c) for c in raw if c and isinstance(c, str)]
+    chunks = [c for c in chunks if len(c) > 10]
     if not chunks:
         return 0
 
@@ -255,16 +264,27 @@ async def ingest_gdrive(folder_id: str | None = None):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Google Drive 파일 목록 오류: {e}")
 
+    MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB
     processed, skipped, total_chunks = 0, 0, 0
+    import logging
+    logger = logging.getLogger(__name__)
+
     for f in files:
         ext = get_extension(f["mimeType"])
         if ext not in SUPPORTED_EXTENSIONS:
             skipped += 1
             continue
+        size = int(f.get("size", 0) or 0)
+        if size > MAX_FILE_BYTES:
+            logger.info(f"[gdrive] skip (too large {size//1024//1024}MB): {f['name']}")
+            skipped += 1
+            continue
+        logger.info(f"[gdrive] processing: {f['name']}")
         try:
             data = await asyncio.to_thread(download_file, service, f["id"], f["mimeType"])
             text = extract_text(data, ext).strip()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[gdrive] failed to parse {f['name']}: {e}")
             skipped += 1
             continue
         if not text:
@@ -278,8 +298,14 @@ async def ingest_gdrive(folder_id: str | None = None):
             "file_path": f"gdrive://{f['id']}",
             "created_at": int(modified) if modified else 0,
         }
-        total_chunks += ingest_document(text, doc_id_key=f["id"], metadata=metadata)
-        processed += 1
+        try:
+            n = ingest_document(text, doc_id_key=f["id"], metadata=metadata)
+            total_chunks += n
+            processed += 1
+            logger.info(f"[gdrive] done: {f['name']} ({n} chunks)")
+        except Exception as e:
+            logger.warning(f"[gdrive] ingest failed {f['name']}: {e}")
+            skipped += 1
 
     return ExternalIngestResponse(
         status="ok",
